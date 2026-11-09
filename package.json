@@ -1,0 +1,38 @@
+{
+  "name": "flowboom",
+  "version": "0.1.0",
+  "description": "Flowboom CLI and agent skills for content operations",
+  "type": "module",
+  "bin": {
+    "flowboom": "bin/flowboom.js"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "bin/flowboom.js",
+    "src/",
+    "skills/",
+    "docs/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check bin/flowboom.js && node --check src/cli.js && node --check src/json.js",
+    "verify": "npm run check && npm test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GigaValue/flowboom-cli.git"
+  },
+  "homepage": "https://github.com/GigaValue/flowboom-cli#readme",
+  "bugs": {
+    "url": "https://github.com/GigaValue/flowboom-cli/issues"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}
