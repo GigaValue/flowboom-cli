@@ -31,10 +31,10 @@ Scopes: `flowboom.read` (required content/SEO/status reads), `flowboom.knowledge
 | GET `/sites/:id/seo/opportunities?status=STATUS` | read | existing opportunities |
 | POST `/knowledge/search` | read + knowledge | `{query,siteId}` → enabled knowledge paragraph hits; requires knowledge.read RBAC |
 | POST `/articles` | read + drafts | article draft only; content.write RBAC |
-| POST `/topics` | read + drafts | manual draft topic only; content.write RBAC |
+| POST `/topics` | read + drafts | manual pending topic only; content.write RBAC |
 | POST `/knowledge/briefs` | read + knowledge + drafts | traceable draft Brief; knowledge.read/content.write RBAC |
 
-Article draft JSON: required `siteId`, `title` (≤200 characters), `slug` (≤255 bytes); optional `categoryId`, `summary`, `contentMarkdown`, `seoTitle`, `seoDescription`. Topic JSON: required `siteId`, `title`; optional `categoryId`, `angle`, `intent`, `priority`. Status is server-owned `draft`. Linked object fields, scheduled publishing, custom prompts and workflow transitions are not accepted. Site/category ownership must match the authorized workspace.
+Article draft JSON: required `siteId`, `title` (≤200 characters), `slug` (≤255 bytes); optional `categoryId`, `summary`, `contentMarkdown`, `seoTitle`, `seoDescription`. Topic JSON: required `siteId`, `title`; optional `categoryId`, `angle`, `intent`, `priority`. Article status is server-owned `draft`; topic status is server-owned `pending`, compatible with the existing approval workflow. Linked object fields, scheduled publishing, custom prompts and workflow transitions are not accepted. Site/category ownership must match the authorized workspace.
 
 Knowledge Brief JSON: `requestId` (8–64 characters; retain across transport retries), `siteId`, `title`, `keyword`, `requirements` (≤5000 characters), `paragraphIds` (1–8 enabled current paragraphs). The response is a reference snapshot containing `briefId`, not a generation task. The same requestId with changed inputs is rejected.
 

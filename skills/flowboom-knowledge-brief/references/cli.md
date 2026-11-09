@@ -30,7 +30,7 @@
 ```
 ID 是占位符；用当前 profile/workspace 查询出的 ID。categoryId 可选，必须来自目标站。不要提交 status、publishAt、关联对象 ID 或自定义生成配置；服务端强制草稿。
 
-选题 `topics create --file topic.json`：
+选题 `topics create --file topic.json`（保存为 pending，待人工审批）：
 ```json
 {"siteId":1,"title":"示例选题","angle":"切入点","intent":"informational","priority":1}
 ```
