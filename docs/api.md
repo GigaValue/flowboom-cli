@@ -1,6 +1,6 @@
 # Device OAuth and Skills API contract
 
-Paths are relative to `/api/v1` on the selected HTTPS origin. First-party public client ID: `flowboom-cli`; no client secret. Both cn and global must implement the same contract; account, workspace and credential stores remain independent.
+Paths are relative to `/api/v1` on the selected HTTPS origin. First-party public client ID: `flowboom-cli`; no client secret. The Node.js executable is `flowboom`; renaming the command does not change the registered OAuth client ID. Both cn and global must implement the same contract; account, workspace and credential stores remain independent.
 
 ## Login
 
@@ -51,3 +51,7 @@ Responses retain the existing `{data:...}` envelope and pagination metadata. 401
 - GET `/skills/publication-plan?siteId=ID&page=1&pageSize=20`: read scope; safe article identities, titles, status, publication dates and enabled publish_sweep IDs/names/cron expressions; no recipe config, provider errors or credentials.
 
 Responses identify `execution=next_enabled_publish_sweep` and `scheduleTimezone=Asia/Shanghai`, matching the existing worker. Date batches follow UTC-normalized time with fixed day intervals. No independent exact-time job is created; due articles follow existing enabled pipeline/worker behavior, so outage or disabling the pipeline delays execution. Persisted plans do not depend on CLI login remaining active. No customer publication is performed in verification.
+
+## Node.js client compatibility
+
+The CLI runs on Node.js 22.12+ as `flowboom`, with no runtime npm dependencies. The HTTP contract, OAuth client ID `flowboom-cli`, profile names and credential JSON fields are unchanged by the implementation migration. Existing private Go CLI credentials remain readable at the same OS paths; refresh and revocation still use the login origin. The npm package name and its `bin` command are both `flowboom`; the repository and OAuth client ID remain `flowboom-cli`.

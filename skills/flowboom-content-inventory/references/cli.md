@@ -1,6 +1,6 @@
 # CLI 与登录
 
-先运行 `flowboom auth status`；命令不存在时也检查 `flowboom-cli`（go install 默认名称）。未安装时按公开仓库 GigaValue/flowboom-cli 的 README 安装，不下载执行未知脚本。后续示例的 `flowboom` 可替换为实际二进制名称。
+先运行 `flowboom auth status`。CLI 使用 Node.js 22.12+，命令统一为 `flowboom`；未安装时按公开仓库 GigaValue/flowboom-cli 的 README 安装（当前可用 `npm install -g github:GigaValue/flowboom-cli`），不下载执行未知脚本。npm 包名和命令名都为 `flowboom`；仓库名/OAuth client_id 仍为 `flowboom-cli`。
 
 国内 `--profile cn` 对应 https://cloud.flowboom.cn，海外 `--profile global` 对应 https://cloud.flowboom.io；海外尚待部署，不保证连接成功。明确用户要操作的站点区域，并在每条命令保持同一 profile（例如 `flowboom --profile global sites list`）。不把一站的凭据、工作空间或站点 ID 用于另一站。
 
