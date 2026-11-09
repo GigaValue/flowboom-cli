@@ -403,3 +403,39 @@ func TestRefreshCannotEnlargeWorkspaceSnapshot(t *testing.T) {
 		t.Fatal("refresh expanded authorization")
 	}
 }
+
+func TestScheduleCommandsRequireFlagNotFileConfirmation(t *testing.T) {
+	for _, action := range []string{"schedule", "unschedule"} {
+		t.Run(action, func(t *testing.T) {
+			confirmations := []bool{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "POST" || r.URL.Path != "/api/v1/skills/articles/"+action {
+					t.Error("wrong plan endpoint")
+				}
+				var in map[string]any
+				if json.NewDecoder(r.Body).Decode(&in) != nil {
+					t.Error("invalid JSON")
+				}
+				value, ok := in["confirm"].(bool)
+				if !ok {
+					t.Error("missing confirmation")
+				}
+				confirmations = append(confirmations, value)
+				io.WriteString(w, `{"data":{"confirmed":false,"items":[]}}`)
+			}))
+			defer server.Close()
+			a := testApp(t, "cn")
+			a.save(validCred(server.URL))
+			file := filepath.Join(t.TempDir(), "plan.json")
+			os.WriteFile(file, []byte(`{"siteId":9,"articleIds":[12],"startAt":"2030-01-01T09:00:00+08:00","intervalDays":1,"perDay":5,"confirm":true}`), 0600)
+			for _, args := range [][]string{{"articles", action, "--file", file}, {"articles", action, "--file", file, "--confirm"}} {
+				if e := a.run(context.Background(), args); e != nil {
+					t.Fatal(e)
+				}
+			}
+			if len(confirmations) != 2 || confirmations[0] || !confirmations[1] {
+				t.Fatal("file bypassed preview", confirmations)
+			}
+		})
+	}
+}

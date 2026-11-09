@@ -53,6 +53,20 @@ func (e *apiError) Error() string {
 	if e.Code == "authorization_pending" || e.Code == "slow_down" || e.Code == "access_denied" || e.Code == "expired_token" {
 		return e.Code
 	}
+	switch e.Code {
+	case "configure an enabled publish_sweep for this site before confirming a publication plan":
+		return "this site needs an enabled publish_sweep pipeline; configure it in Flowboom before saving the plan"
+	case "all selected articles must be reviewed ready SEO articles":
+		return "all selected articles must be reviewed ready SEO articles; finish approval in Flowboom first"
+	case "only scheduled ready, draft, reviewing or rejected articles can be unscheduled":
+		return "only scheduled unpublished articles can be unscheduled; inspect article and task status"
+	case "select 1-100 unique articles, a future RFC3339 startAt with timezone, intervalDays 1-365 and perDay 1-20":
+		return "invalid plan: select 1-100 unique articles, a future time with timezone, intervalDays 1-365 and perDay 1-20"
+	case "only reviewed ready articles can be published":
+		return "article must pass review before publication"
+	case "SEO score is below the site publish threshold", "SEO error-level checks must pass before publish":
+		return "article did not pass the site SEO publish checks; inspect it in Flowboom"
+	}
 	return fmt.Sprintf("request failed (HTTP %d); check authorization, workspace and permissions", e.Status)
 }
 
@@ -455,8 +469,8 @@ func (a *app) run(ctx context.Context, args []string) error {
 		}
 		return a.articleAction(ctx, action, id, *confirm)
 	}
-	if *confirm {
-		return errors.New("--confirm is only valid for articles publish")
+	if *confirm && !(cmd == "articles" && (action == "schedule" || action == "unschedule")) {
+		return errors.New("--confirm is only valid for article publication or scheduling")
 	}
 	method := "GET"
 	path := ""
@@ -492,6 +506,19 @@ func (a *app) run(ctx context.Context, args []string) error {
 		path = "/categories"
 	case "articles", "topics", "briefs":
 		switch action {
+		case "schedule", "unschedule":
+			if cmd != "articles" {
+				return errors.New("scheduling requires articles")
+			}
+			method = "POST"
+			path = "/articles/" + action
+		case "plan":
+			if cmd != "articles" || *site == 0 {
+				return errors.New("use articles plan --site ID")
+			}
+			path = "/publication-plan"
+			values.Set("page", strconv.Itoa(*page))
+			values.Set("pageSize", strconv.Itoa(*size))
 		case "list":
 			path = "/" + cmd
 			values.Set("page", strconv.Itoa(*page))
@@ -575,6 +602,14 @@ func (a *app) run(ctx context.Context, args []string) error {
 			return errors.New("request file must contain valid JSON, at most 1 MiB")
 		}
 	}
+	if cmd == "articles" && (action == "schedule" || action == "unschedule") {
+		var input map[string]json.RawMessage
+		if json.Unmarshal(body, &input) != nil || input == nil {
+			return errors.New("plan file must contain a JSON object")
+		}
+		input["confirm"], _ = json.Marshal(*confirm)
+		body, _ = json.Marshal(input)
+	}
 	if method == "GET" && len(values) > 0 {
 		path += "?" + values.Encode()
 	}
@@ -604,6 +639,9 @@ Credentials and workspace authorization are isolated per profile.
   articles create --file article.json
   articles submit-review ID
   articles publish ID [--confirm]
+  articles schedule --file plan.json [--confirm]
+  articles unschedule --file selection.json [--confirm]
+  articles plan --site ID [--page N]
   publish-tasks get ID
   topics list [--site ID] [--status STATUS]
   topics create --file topic.json
@@ -616,7 +654,9 @@ Credentials and workspace authorization are isolated per profile.
   seo opportunities --site ID [--status STATUS]
 
 API results are JSON. Tokens are never printed. Writes are never retried.
-Publish without --confirm previews the exact target; --confirm queues an approved article.
+Publish/schedule/unschedule without --confirm only previews the exact targets.
+Scheduling uses the site enabled publish_sweep pipeline; due articles publish on its next run.
+Canceling a ready article plan returns it to draft to prevent unintended automatic publication.
 Review approval, paid generation and customer outreach remain in the web app.
 `
 

@@ -86,3 +86,16 @@ flowboom --workspace 12 publish-tasks get 56
 ```
 
 Submission/publication requires separately checked `flowboom.publish` browser consent and existing `content.write` permission. Existing tokens never gain this scope automatically. Re-login to grant it. Publication retains SEO/content-pack review checks and does not offer force or approval commands. A returned task means queued, not published. Writes are not retried; inspect task/article state after an ambiguous failure and use the web workflow for recovery. Legacy single-workspace credentials remain usable.
+
+## Batch publication plans
+
+For already reviewed articles, prepare `plan.json` with `{ "siteId": 1, "articleIds": [11,12], "startAt": "2030-01-01T09:00:00+08:00", "intervalDays": 1, "perDay": 5 }` (replace example IDs/date).
+
+```sh
+flowboom --workspace 12 articles schedule --file plan.json           # preview only
+flowboom --workspace 12 articles schedule --file plan.json --confirm
+flowboom --workspace 12 articles plan --site 1
+flowboom --workspace 12 articles unschedule --file selection.json    # preview only
+```
+
+A plan accepts 1–100 ready SEO articles in the provided order, with 1–20 per batch and 1–365 days between batches. Time must include an explicit timezone and be in the future. Saving requires an enabled site `publish_sweep` pipeline; execution occurs on its next run after each due time, not at an independent exact timer. Existing cron uses Asia/Shanghai. The CLI does not enable site-wide automation. Plans persist after logout. Cancellation (`selection.json`: `siteId`, `articleIds`, add `--confirm` to apply) clears dates and returns ready articles to draft to prevent the next sweep from publishing them immediately; reapproval is needed afterward. Publishing/published articles cannot be canceled this way.
