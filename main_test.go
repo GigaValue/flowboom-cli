@@ -257,3 +257,149 @@ func TestCommandContracts(t *testing.T) {
 		t.Fatal("unsafe path ID")
 	}
 }
+
+func TestWorkspaceSwitchOverrideAndRefresh(t *testing.T) {
+	ctx := context.Background()
+	calls := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.URL.Path+":"+r.Header.Get("X-Tenant-ID"))
+		switch r.URL.Path {
+		case "/api/v1/oauth/token":
+			io.WriteString(w, `{"access_token":"next","refresh_token":"next-refresh","expires_in":3600,"tenant_id":7,"tenant_ids":[7,8],"scope":"flowboom.read"}`)
+		case "/api/v1/skills/workspaces":
+			if r.Header.Get("X-Tenant-ID") != "" {
+				t.Error("workspace list must survive removal of default membership")
+			}
+			io.WriteString(w, `{"data":[{"id":7,"name":"A"},{"id":8,"name":"B"}]}`)
+		default:
+			io.WriteString(w, `{"data":[]}`)
+		}
+	}))
+	defer server.Close()
+	a := testApp(t, "cn")
+	c := validCred(server.URL)
+	c.TenantIDs = []uint64{7, 8}
+	if e := a.save(c); e != nil {
+		t.Fatal(e)
+	}
+	if e := a.run(ctx, []string{"workspaces", "list"}); e != nil {
+		t.Fatal(e)
+	}
+	if e := a.run(ctx, []string{"workspaces", "use", "8"}); e != nil {
+		t.Fatal(e)
+	}
+	c, _ = a.load()
+	if c.TenantID != 8 {
+		t.Fatal("default not saved")
+	}
+	c.ExpiresAt = time.Now().Add(-time.Minute)
+	a.save(c)
+	if e := a.run(ctx, []string{"sites", "list"}); e != nil {
+		t.Fatal(e)
+	}
+	c, _ = a.load()
+	if c.TenantID != 8 {
+		t.Fatal("refresh reset chosen workspace")
+	}
+	if e := a.run(ctx, []string{"sites", "list", "--workspace", "7"}); e != nil {
+		t.Fatal(e)
+	}
+	c, _ = a.load()
+	if c.TenantID != 8 {
+		t.Fatal("override changed persistent default")
+	}
+	before := len(calls)
+	if e := a.run(ctx, []string{"sites", "list", "--workspace", "9"}); e == nil || len(calls) != before {
+		t.Fatal("unauthorized workspace sent request")
+	}
+	a.workspace = 0
+	if e := a.run(ctx, []string{"workspaces", "use", "9"}); e == nil {
+		t.Fatal("unauthorized default accepted")
+	}
+	if !strings.HasSuffix(calls[len(calls)-1], ":7") {
+		t.Fatal(calls)
+	}
+}
+
+func TestPublishPreviewConfirmationAndNoRetry(t *testing.T) {
+	for _, state := range []string{"draft", "ready"} {
+		t.Run(state, func(t *testing.T) {
+			posts := 0
+			reads := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("X-Tenant-ID") != "7" {
+					t.Error("wrong workspace")
+				}
+				switch {
+				case r.Method == "GET" && r.URL.Path == "/api/v1/skills/articles/12":
+					reads++
+					json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"id": 12, "siteId": 9, "title": "Exact target", "status": state}})
+				case r.Method == "POST" && r.URL.Path == "/api/v1/skills/articles/12/publish":
+					posts++
+					var in map[string]any
+					json.NewDecoder(r.Body).Decode(&in)
+					if in["confirm"] != true {
+						t.Error("missing confirmation")
+					}
+					w.WriteHeader(503)
+					io.WriteString(w, `{"error":"PRIVATE-QUEUE-SECRET"}`)
+				default:
+					t.Error(r.Method, r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			a := testApp(t, "cn")
+			a.save(validCred(server.URL))
+			if e := a.run(context.Background(), []string{"articles", "publish", "12"}); e != nil {
+				t.Fatal(e)
+			}
+			if posts != 0 || reads != 1 || !strings.Contains(a.out.(*bytes.Buffer).String(), `"confirmationRequired": true`) {
+				t.Fatal("preview mutated or missing target")
+			}
+			e := a.run(context.Background(), []string{"articles", "publish", "12", "--confirm"})
+			if e == nil || strings.Contains(e.Error(), "PRIVATE") {
+				t.Fatal("unsafe failure", e)
+			}
+			want := 0
+			if state == "ready" {
+				want = 1
+			}
+			if posts != want {
+				t.Fatal("publish unreviewed or retried", posts)
+			}
+		})
+	}
+}
+
+func TestSubmitReviewAndTaskCommands(t *testing.T) {
+	seen := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		io.WriteString(w, `{"data":{"id":12,"status":"reviewing"}}`)
+	}))
+	defer server.Close()
+	a := testApp(t, "cn")
+	a.save(validCred(server.URL))
+	for _, args := range [][]string{{"articles", "submit-review", "12"}, {"publish-tasks", "get", "13"}} {
+		if e := a.run(context.Background(), args); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if strings.Join(seen, "|") != "POST /api/v1/skills/articles/12/submit-review|GET /api/v1/skills/publish-tasks/13" {
+		t.Fatal(seen)
+	}
+}
+
+func TestRefreshCannotEnlargeWorkspaceSnapshot(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"access_token":"next","refresh_token":"next-refresh","expires_in":3600,"tenant_id":9,"tenant_ids":[7,9],"scope":"flowboom.read"}`)
+	}))
+	defer server.Close()
+	a := testApp(t, "cn")
+	c := validCred(server.URL)
+	c.ExpiresAt = time.Now().Add(-time.Minute)
+	a.save(c)
+	if _, e := a.ready(context.Background()); e == nil {
+		t.Fatal("refresh expanded authorization")
+	}
+}

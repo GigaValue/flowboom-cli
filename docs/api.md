@@ -6,17 +6,21 @@ Paths are relative to `/api/v1` on the selected HTTPS origin. First-party public
 
 1. Form POST `/oauth/device/code`: `client_id`, `scope`. Returns `device_code`, `user_code`, `verification_uri`, `verification_uri_complete`, `expires_in` (600 seconds), `interval` (5 seconds).
 2. Browser opens `/oauth/device`, signs in through normal web login and completes captcha if configured. Compare the displayed code to your own terminal. Only approve requests you initiated.
-3. Existing browser JWT authorizes JSON POST `/oauth/device/inspect` (`user_code`) and `/oauth/device/decision` (`user_code`, `tenant_id`, approved `scope`, `approve`). Workspace selection and optional scopes require explicit input. A denial requires no workspace.
+3. Existing browser JWT authorizes JSON POST `/oauth/device/inspect` (`user_code`) and `/oauth/device/decision` (`user_code`, `tenant_ids` (explicit current-workspace ID snapshot; legacy `tenant_id` accepted), approved `scope`, `approve`). Workspace selection and optional scopes require explicit input. A denial requires no workspace.
 4. CLI polls form POST `/oauth/token` with `client_id`, `grant_type=urn:ietf:params:oauth:grant-type:device_code`, `device_code`. Honor `authorization_pending`, `slow_down` (+5 seconds), `access_denied`, `expired_token`.
-5. Token response: `access_token`, `refresh_token`, `token_type=Bearer`, `expires_in`, `scope`, `tenant_id`. Access expires after at most one hour; session after seven days. Refresh with `grant_type=refresh_token`, `refresh_token`, `client_id`; both tokens rotate. A lost token response requires a new login.
+5. Token response: `access_token`, `refresh_token`, `token_type=Bearer`, `expires_in`, `scope`, `tenant_id` (default), `tenant_ids` (currently active consented IDs). Access expires after at most one hour; session after seven days. Refresh with `grant_type=refresh_token`, `refresh_token`, `client_id`; both tokens rotate. A lost token response requires a new login.
 6. Form POST `/oauth/revoke` with `client_id`, `token` revokes that session. Browser JWT GET `/oauth/sessions` and DELETE `/oauth/sessions/:id` manage the user's own sessions.
 
-Scopes: `flowboom.read` (required content/SEO/status reads), `flowboom.knowledge` (knowledge search), `flowboom.drafts` (draft creation). They do not grant additional membership/RBAC permissions. Tokens bind one workspace. Every Skills request carries `Authorization: Bearer ...` and `X-Tenant-ID`; mismatches fail. Device access is checked against live membership/account state and revocation. Device tokens are rejected by existing JWT business/admin APIs.
+Scopes: `flowboom.read` (required content/SEO/status reads), `flowboom.knowledge` (knowledge search), `flowboom.drafts` (draft creation), `flowboom.publish` (submit review and publish a reviewed ready article). They do not grant additional membership/RBAC permissions. Tokens bind a snapshot of explicitly consented workspaces; new memberships are excluded. `GET /skills/workspaces` lists only active consented IDs/names and needs no tenant header. Other Skills requests carry `Authorization: Bearer ...` and `X-Tenant-ID`; IDs outside the snapshot fail. Removal of one membership blocks that workspace immediately while other authorized workspaces remain usable; refresh returns and persists only currently active consented IDs. Memberships removed at refresh require fresh consent if subsequently restored. Device access is checked against live membership/account state and revocation. Device tokens are rejected by existing JWT business/admin APIs.
 
 ## Content operations
 
 | Method/path under `/skills` | Scope | Result |
 |---|---|---|
+| GET `/workspaces` | read | active consented workspace IDs/names; no tenant header |
+| POST `/articles/:id/submit-review` | read + publish | draft/rejected → reviewing; content.write RBAC |
+| POST `/articles/:id/publish` | read + publish | `{confirm:true}` → async publish task; ready only, SEO/content-pack gates, content.write RBAC; no force |
+| GET `/publish-tasks/:id` | read | safe task identity/state/timestamps; no raw logs/errors |
 | GET `/identity` | read | user ID, authorized tenant and scopes |
 | GET `/sites` | read | site ID, name, domain, language, engine, status; no deployment settings |
 | GET `/categories?siteId=ID` | read | category identity, no generation credentials |
@@ -38,4 +42,4 @@ Article draft JSON: required `siteId`, `title` (≤200 characters), `slug` (≤2
 
 Knowledge Brief JSON: `requestId` (8–64 characters; retain across transport retries), `siteId`, `title`, `keyword`, `requirements` (≤5000 characters), `paragraphIds` (1–8 enabled current paragraphs). The response is a reference snapshot containing `briefId`, not a generation task. The same requestId with changed inputs is rejected.
 
-Responses retain the existing `{data:...}` envelope and pagination metadata. 401 means invalid/expired/revoked authorization; 403 means workspace, scope or role denied. Do not report permission failure as empty business data. Server bodies/logs may contain operational details: the CLI prints only stable errors, not raw error bodies. POSTs are not automatically retried. Nothing here grants publishing, paid execution, billing, contacts or platform administration.
+Responses retain the existing `{data:...}` envelope and pagination metadata. 401 means invalid/expired/revoked authorization; 403 means workspace, scope or role denied. Do not report permission failure as empty business data. Server bodies/logs may contain operational details: the CLI prints only stable errors, not raw error bodies. POSTs are not automatically retried. Publication needs explicit publish scope, confirmation and an approved article; no review-approval endpoint exists. Existing grants do not gain publish scope. Nothing here grants paid generation, billing, contacts or platform administration. Repeat publication of an in-flight article is rejected; ambiguous enqueue failure retains task evidence for recovery via the web workflow.
