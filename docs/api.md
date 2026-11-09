@@ -1,0 +1,41 @@
+# Device OAuth and Skills API contract
+
+Paths are relative to `/api/v1` on the selected HTTPS origin. First-party public client ID: `flowboom-cli`; no client secret. Both cn and global must implement the same contract; account, workspace and credential stores remain independent.
+
+## Login
+
+1. Form POST `/oauth/device/code`: `client_id`, `scope`. Returns `device_code`, `user_code`, `verification_uri`, `verification_uri_complete`, `expires_in` (600 seconds), `interval` (5 seconds).
+2. Browser opens `/oauth/device`, signs in through normal web login and completes captcha if configured. Compare the displayed code to your own terminal. Only approve requests you initiated.
+3. Existing browser JWT authorizes JSON POST `/oauth/device/inspect` (`user_code`) and `/oauth/device/decision` (`user_code`, `tenant_id`, approved `scope`, `approve`). Workspace selection and optional scopes require explicit input. A denial requires no workspace.
+4. CLI polls form POST `/oauth/token` with `client_id`, `grant_type=urn:ietf:params:oauth:grant-type:device_code`, `device_code`. Honor `authorization_pending`, `slow_down` (+5 seconds), `access_denied`, `expired_token`.
+5. Token response: `access_token`, `refresh_token`, `token_type=Bearer`, `expires_in`, `scope`, `tenant_id`. Access expires after at most one hour; session after seven days. Refresh with `grant_type=refresh_token`, `refresh_token`, `client_id`; both tokens rotate. A lost token response requires a new login.
+6. Form POST `/oauth/revoke` with `client_id`, `token` revokes that session. Browser JWT GET `/oauth/sessions` and DELETE `/oauth/sessions/:id` manage the user's own sessions.
+
+Scopes: `flowboom.read` (required content/SEO/status reads), `flowboom.knowledge` (knowledge search), `flowboom.drafts` (draft creation). They do not grant additional membership/RBAC permissions. Tokens bind one workspace. Every Skills request carries `Authorization: Bearer ...` and `X-Tenant-ID`; mismatches fail. Device access is checked against live membership/account state and revocation. Device tokens are rejected by existing JWT business/admin APIs.
+
+## Content operations
+
+| Method/path under `/skills` | Scope | Result |
+|---|---|---|
+| GET `/identity` | read | user ID, authorized tenant and scopes |
+| GET `/sites` | read | site ID, name, domain, language, engine, status; no deployment settings |
+| GET `/categories?siteId=ID` | read | category identity, no generation credentials |
+| GET `/articles?siteId=ID&page=1&pageSize=20&q=TEXT&status=draft` | read | paged articles (`data`, `total`, `page`, `pageSize`) |
+| GET `/articles/:id` | read | one article |
+| GET `/briefs?siteId=ID&page=1&pageSize=20` | read | paged Brief summaries; fetch detail before reasoning about requirements |
+| GET `/briefs/:id` | read | Brief detail excluding raw source/prompt fields |
+| GET `/topics?siteId=ID&status=draft` | read | existing topic list |
+| GET `/source-items?siteId=ID&page=1&status=new` | read | source title sample, total; excludes raw payload |
+| GET `/diagnostics?siteId=ID` | read | cumulative status counts and 30 most recent generation/publish task projections; no logs |
+| GET `/sites/:id/seo/overview?from=DATE&to=DATE&engine=google&source=ga4` | read | real existing report, including sync coverage |
+| GET `/sites/:id/seo/opportunities?status=STATUS` | read | existing opportunities |
+| POST `/knowledge/search` | read + knowledge | `{query,siteId}` → enabled knowledge paragraph hits; requires knowledge.read RBAC |
+| POST `/articles` | read + drafts | article draft only; content.write RBAC |
+| POST `/topics` | read + drafts | manual draft topic only; content.write RBAC |
+| POST `/knowledge/briefs` | read + knowledge + drafts | traceable draft Brief; knowledge.read/content.write RBAC |
+
+Article draft JSON: required `siteId`, `title` (≤200 characters), `slug` (≤255 bytes); optional `categoryId`, `summary`, `contentMarkdown`, `seoTitle`, `seoDescription`. Topic JSON: required `siteId`, `title`; optional `categoryId`, `angle`, `intent`, `priority`. Status is server-owned `draft`. Linked object fields, scheduled publishing, custom prompts and workflow transitions are not accepted. Site/category ownership must match the authorized workspace.
+
+Knowledge Brief JSON: `requestId` (8–64 characters; retain across transport retries), `siteId`, `title`, `keyword`, `requirements` (≤5000 characters), `paragraphIds` (1–8 enabled current paragraphs). The response is a reference snapshot containing `briefId`, not a generation task. The same requestId with changed inputs is rejected.
+
+Responses retain the existing `{data:...}` envelope and pagination metadata. 401 means invalid/expired/revoked authorization; 403 means workspace, scope or role denied. Do not report permission failure as empty business data. Server bodies/logs may contain operational details: the CLI prints only stable errors, not raw error bodies. POSTs are not automatically retried. Nothing here grants publishing, paid execution, billing, contacts or platform administration.

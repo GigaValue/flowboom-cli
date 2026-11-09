@@ -1,0 +1,5 @@
+/bin/
+/flowboom
+*.test
+coverage.out
+.DS_Store
