@@ -104,3 +104,20 @@ flowboom --workspace 12 articles unschedule --file selection.json    # preview o
 ```
 
 A plan accepts 1–100 ready SEO articles in the provided order, with 1–20 per batch and 1–365 days between batches. Time must include an explicit timezone and be in the future. Saving requires an enabled site `publish_sweep` pipeline; execution occurs on its next run after each due time, not at an independent exact timer. Existing cron uses Asia/Shanghai. The CLI does not enable site-wide automation. Plans persist after logout. Cancellation (`selection.json`: `siteId`, `articleIds`, add `--confirm` to apply) clears dates and returns ready articles to draft to prevent the next sweep from publishing them immediately; reapproval is needed afterward. Publishing/published articles cannot be canceled this way.
+
+## Edit a draft and upgrade
+
+```sh
+flowboom articles update ARTICLE_ID --file changes.json
+flowboom upgrade
+```
+
+`changes.json` contains only fields to change, for example:
+
+```json
+{"title":"Updated title","contentMarkdown":"# Updated article","summary":""}
+```
+
+Editable fields: title, slug, summary, contentMarkdown, seoTitle, seoDescription and categoryId. Omitted/null fields stay unchanged; empty strings clear optional text. Only unpublished draft/rejected articles can be edited. Reviewed, reviewing, publishing and published articles are rejected. Managed translations must be edited in the web app. Draft scope and content.write permission are required; changes never grant approval. Editing requires a server version that exposes the draft PATCH endpoint.
+
+`flowboom upgrade` runs `npm install --global github:GigaValue/flowboom-cli` using npm's configured global prefix. Use it for a global npm installation; local/npx/source checkouts should be updated through their original installation method. npm must be available and its global directory writable. No sudo or credential reset is performed.

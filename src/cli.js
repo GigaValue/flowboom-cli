@@ -13,6 +13,8 @@ const scopes = 'flowboom.read flowboom.knowledge flowboom.drafts flowboom.publis
 const MAX_RESPONSE = 8 * 1024 * 1024;
 const MAX_FILE = 1024 * 1024;
 const safeErrors = new Map([
+  ['only unpublished draft or rejected articles can be edited', 'Only unpublished draft or rejected articles can be edited; inspect review/publication state first.'],
+  ['managed translation must be edited in Flowboom', 'Managed translations must be edited in the Flowboom web app.'],
   ['configure an enabled publish_sweep for this site before confirming a publication plan', 'This site needs an enabled publish_sweep pipeline; configure it in Flowboom before saving the plan.'],
   ['all selected articles must be reviewed ready SEO articles', 'All selected articles must be reviewed ready SEO articles; finish approval in Flowboom first.'],
   ['only scheduled ready, draft, reviewing or rejected articles can be unscheduled', 'Only scheduled unpublished articles can be unscheduled; inspect article and task status.'],
@@ -236,6 +238,10 @@ export class App {
     if (flags.help || !positionals.length || positionals[0] === 'help') { this.out.write(help); return; }
     const [command, action, rawID, ...extra] = positionals;
     if (extra.length) throw new Error('Unexpected arguments.');
+    if (command === 'upgrade') {
+      if (action || rawID) throw new Error('Use flowboom upgrade.');
+      return upgrade();
+    }
     if (command === 'auth') {
       if (rawID) throw new Error('Unexpected auth arguments.');
       if (flags.confirm) throw new Error('--confirm is only valid for article publication or scheduling.');
@@ -245,7 +251,7 @@ export class App {
       if ((action === 'list' && rawID) || !['list', 'use'].includes(action)) throw new Error('Use workspaces list or workspaces use ID.');
       return this.workspaces(action, rawID);
     }
-    const requiresID = ['get', 'submit-review', 'publish'].includes(action);
+    const requiresID = ['get', 'update', 'submit-review', 'publish'].includes(action);
     const id = requiresID && rawID ? positiveID(rawID) : undefined;
     if (rawID && !requiresID) throw new Error('Unexpected arguments.');
     if (command === 'articles' && ['submit-review', 'publish'].includes(action)) {
@@ -269,6 +275,7 @@ export class App {
           endpoint = `/${command}`; query.set('page', page); query.set('pageSize', size);
           if (flags.query) query.set('q', flags.query); if (flags.status) query.set('status', flags.status);
         } else if (action === 'get' && id && command !== 'topics') endpoint = `/${command}/${id}`;
+        else if (command === 'articles' && action === 'update' && id) { method = 'PATCH'; endpoint = `/articles/${id}`; }
         else if (action === 'create' && command !== 'briefs') { method = 'POST'; endpoint = `/${command}`; }
         else if (action === 'from-knowledge' && command === 'briefs') { method = 'POST'; endpoint = '/knowledge/briefs'; }
         else if (command === 'articles' && ['schedule', 'unschedule'].includes(action)) { method = 'POST'; endpoint = `/articles/${action}`; }
@@ -287,7 +294,7 @@ export class App {
         break;
       default: throw new Error('Unknown command; run flowboom help.');
     }
-    if (method === 'POST' && body === undefined) {
+    if (['POST', 'PATCH'].includes(method) && body === undefined) {
       if (!flags.file) throw new Error('--file is required.');
       try {
         const file = await fs.open(flags.file, 'r');
@@ -311,6 +318,7 @@ Profiles: cn=https://cloud.flowboom.cn (default)
 
   auth login [--no-browser] [--read-only] [--base-url HTTPS_ORIGIN]
   auth status | auth logout
+  upgrade
   workspaces list | workspaces use ID
   sites list
   sources list [--site ID] [--page N] [--status STATUS]
@@ -318,6 +326,7 @@ Profiles: cn=https://cloud.flowboom.cn (default)
   articles list [--site ID] [--status STATUS] [--query TEXT] [--page N]
   articles get ID
   articles create --file article.json
+  articles update ID --file changes.json
   articles submit-review ID
   articles publish ID [--confirm]
   articles schedule --file plan.json [--confirm]
@@ -340,3 +349,14 @@ Scheduling uses the site's enabled publish_sweep pipeline; due articles publish 
 Canceling a ready article plan returns it to draft to prevent unintended automatic publication.
 Review approval, paid generation and customer outreach remain in the web app.
 `;
+
+// Fixed official source; no credentials or user-controlled shell arguments.
+export async function upgrade(run = spawn) {
+  await new Promise((resolve, reject) => {
+    const child = run('npm', ['install', '--global', 'github:GigaValue/flowboom-cli'], {
+      stdio: 'inherit', shell: process.platform === 'win32',
+    });
+    child.once('error', () => reject(new Error('Cannot start npm; install Node.js and npm, then retry flowboom upgrade.')));
+    child.once('exit', code => code === 0 ? resolve() : reject(new Error('Upgrade failed; check npm output and global installation permissions.')));
+  });
+}

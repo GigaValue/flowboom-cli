@@ -213,3 +213,32 @@ test('request timeout/oversize and error bodies remain bounded and redacted', as
   const large = await fixture(t, (_req, res) => res.end('x'.repeat(8 * 1024 * 1024 + 1)));
   await assert.rejects(large.app.run(['sites', 'list']), /oversized/);
 });
+
+test('article updates send PATCH with only supplied fields and preserve large IDs', async t => {
+  const f = await fixture(t, (_req, res) => res.end('{"data":{"status":"draft"}}'));
+  const file = path.join(f.dir, 'changes.json');
+  await fs.writeFile(file, '{"contentMarkdown":"Revised body","summary":""}');
+  await f.app.run(['articles', 'update', '18446744073709551615', '--file', file]);
+  assert.equal(f.requests[0].method, 'PATCH');
+  assert.equal(f.requests[0].path, '/api/v1/skills/articles/18446744073709551615');
+  assert.deepEqual(JSON.parse(f.requests[0].body), { contentMarkdown: 'Revised body', summary: '' });
+  await assert.rejects(f.app.run(['articles', 'update', '--file', file]));
+  await assert.rejects(f.app.run(['articles', 'update', '1']));
+});
+
+test('upgrade installs the fixed official source and reports npm failure', async () => {
+  const { EventEmitter } = await import('node:events');
+  const { upgrade } = await import('../src/cli.js');
+  for (const code of [0, 1]) {
+    const run = (cmd, args, options) => {
+      assert.equal(cmd, 'npm');
+      assert.deepEqual(args, ['install', '--global', 'github:GigaValue/flowboom-cli']);
+      assert.equal(options.stdio, 'inherit');
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit('exit', code));
+      return child;
+    };
+    if (code === 0) await upgrade(run);
+    else await assert.rejects(upgrade(run), /Upgrade failed/);
+  }
+});
