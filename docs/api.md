@@ -34,6 +34,7 @@ Scopes: `flowboom.read` (required content/SEO/status reads), `flowboom.knowledge
 | GET `/sites/:id/seo/overview?from=DATE&to=DATE&engine=google&source=ga4` | read | real existing report, including sync coverage |
 | GET `/sites/:id/seo/opportunities?status=STATUS` | read | existing opportunities |
 | POST `/knowledge/search` | read + knowledge | `{query,siteId}` → enabled knowledge paragraph hits; requires knowledge.read RBAC |
+| PATCH `/articles/:id` | read + drafts | supplied editorial fields only; unpublished draft/rejected, content.write RBAC; revision and SEO updated atomically |
 | POST `/articles` | read + drafts | article draft only; content.write RBAC |
 | POST `/topics` | read + drafts | manual pending topic only; content.write RBAC |
 | POST `/knowledge/briefs` | read + knowledge + drafts | traceable draft Brief; knowledge.read/content.write RBAC |
