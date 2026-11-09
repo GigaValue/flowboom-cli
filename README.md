@@ -28,7 +28,7 @@ flowboom --profile global auth login   # https://cloud.flowboom.io; deployment p
 flowboom --profile global sites list
 ```
 
-`FLOWBOOM_PROFILE=cn|global` sets the default. Each profile stores its own server origin, tokens, granted scope and single authorized workspace. Normal commands and refresh use that stored origin; switching profiles never sends the other site's tokens. Accounts and workspace IDs are independent between sites; no shared login/SSO is assumed. To change workspace, log in again in that profile. For a self-hosted server, pass `auth login --base-url https://your-flowboom.example`; loopback HTTP is accepted for local demos only. International configuration support is not a claim that the international service is deployed.
+`FLOWBOOM_PROFILE=cn|global` sets the default. Each profile stores its own server origin, tokens, granted scope and explicitly authorized workspace snapshot. Normal commands and refresh use that stored origin; switching profiles never sends the other site's tokens. Accounts and workspace IDs are independent between sites; no shared login/SSO is assumed. Use `workspaces list`, `workspaces use ID` to save a default, or `--workspace ID` for one command. Newly joined workspaces require fresh consent. For a self-hosted server, pass `auth login --base-url https://your-flowboom.example`; loopback HTTP is accepted for local demos only. International configuration support is not a claim that the international service is deployed.
 
 Credentials live in the OS user configuration directory (`flowboom/cn.json` and `flowboom/global.json`), outside the repository. Unix permissions are 0700 for the directory and 0600 for the files. Refresh rotates credentials within an absolute seven-day session. Run `flowboom auth logout` to revoke the server session and remove local credentials. Browser `/oauth/device` also lists and revokes active authorizations.
 
@@ -70,3 +70,32 @@ go build -o bin/flowboom .
 ```
 
 Tests use synthetic local HTTP servers and temporary credential directories. They do not contact either production site, invoke paid models or modify real content. See [API contract](docs/api.md) for deployment and permission details.
+
+## Multiple workspaces and publication
+
+Browser consent can select multiple workspaces or **all current workspaces**. New memberships are not automatically included. Every request checks live membership and the selected workspace role. Removing one workspace does not disable access to the remaining authorized workspaces.
+
+```sh
+flowboom workspaces list
+flowboom workspaces use 12
+flowboom --workspace 12 articles submit-review 34
+# Approval remains in the web app.
+flowboom --workspace 12 articles publish 34           # preview only
+flowboom --workspace 12 articles publish 34 --confirm # queue a reviewed ready article
+flowboom --workspace 12 publish-tasks get 56
+```
+
+Submission/publication requires separately checked `flowboom.publish` browser consent and existing `content.write` permission. Existing tokens never gain this scope automatically. Re-login to grant it. Publication retains SEO/content-pack review checks and does not offer force or approval commands. A returned task means queued, not published. Writes are not retried; inspect task/article state after an ambiguous failure and use the web workflow for recovery. Legacy single-workspace credentials remain usable.
+
+## Batch publication plans
+
+For already reviewed articles, prepare `plan.json` with `{ "siteId": 1, "articleIds": [11,12], "startAt": "2030-01-01T09:00:00+08:00", "intervalDays": 1, "perDay": 5 }` (replace example IDs/date).
+
+```sh
+flowboom --workspace 12 articles schedule --file plan.json           # preview only
+flowboom --workspace 12 articles schedule --file plan.json --confirm
+flowboom --workspace 12 articles plan --site 1
+flowboom --workspace 12 articles unschedule --file selection.json    # preview only
+```
+
+A plan accepts 1–100 ready SEO articles in the provided order, with 1–20 per batch and 1–365 days between batches. Time must include an explicit timezone and be in the future. Saving requires an enabled site `publish_sweep` pipeline; execution occurs on its next run after each due time, not at an independent exact timer. Existing cron uses Asia/Shanghai. The CLI does not enable site-wide automation. Plans persist after logout. Cancellation (`selection.json`: `siteId`, `articleIds`, add `--confirm` to apply) clears dates and returns ready articles to draft to prevent the next sweep from publishing them immediately; reapproval is needed afterward. Publishing/published articles cannot be canceled this way.

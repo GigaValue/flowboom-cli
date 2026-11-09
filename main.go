@@ -25,7 +25,7 @@ const clientID = "flowboom-cli"
 
 var origins = map[string]string{"cn": "https://cloud.flowboom.cn", "global": "https://cloud.flowboom.io"}
 
-const scopes = "flowboom.read flowboom.knowledge flowboom.drafts"
+const scopes = "flowboom.read flowboom.knowledge flowboom.drafts flowboom.publish"
 
 type credentials struct {
 	BaseURL      string    `json:"baseUrl"`
@@ -33,14 +33,16 @@ type credentials struct {
 	RefreshToken string    `json:"refreshToken"`
 	ExpiresAt    time.Time `json:"expiresAt"`
 	TenantID     uint64    `json:"tenantId"`
+	TenantIDs    []uint64  `json:"tenantIds,omitempty"`
 	Scope        string    `json:"scope"`
 }
 type tokens struct {
-	Access    string `json:"access_token"`
-	Refresh   string `json:"refresh_token"`
-	ExpiresIn int    `json:"expires_in"`
-	TenantID  uint64 `json:"tenant_id"`
-	Scope     string `json:"scope"`
+	Access    string   `json:"access_token"`
+	Refresh   string   `json:"refresh_token"`
+	ExpiresIn int      `json:"expires_in"`
+	TenantID  uint64   `json:"tenant_id"`
+	TenantIDs []uint64 `json:"tenant_ids"`
+	Scope     string   `json:"scope"`
 }
 type apiError struct {
 	Status int
@@ -51,11 +53,26 @@ func (e *apiError) Error() string {
 	if e.Code == "authorization_pending" || e.Code == "slow_down" || e.Code == "access_denied" || e.Code == "expired_token" {
 		return e.Code
 	}
+	switch e.Code {
+	case "configure an enabled publish_sweep for this site before confirming a publication plan":
+		return "this site needs an enabled publish_sweep pipeline; configure it in Flowboom before saving the plan"
+	case "all selected articles must be reviewed ready SEO articles":
+		return "all selected articles must be reviewed ready SEO articles; finish approval in Flowboom first"
+	case "only scheduled ready, draft, reviewing or rejected articles can be unscheduled":
+		return "only scheduled unpublished articles can be unscheduled; inspect article and task status"
+	case "select 1-100 unique articles, a future RFC3339 startAt with timezone, intervalDays 1-365 and perDay 1-20":
+		return "invalid plan: select 1-100 unique articles, a future time with timezone, intervalDays 1-365 and perDay 1-20"
+	case "only reviewed ready articles can be published":
+		return "article must pass review before publication"
+	case "SEO score is below the site publish threshold", "SEO error-level checks must pass before publish":
+		return "article did not pass the site SEO publish checks; inspect it in Flowboom"
+	}
 	return fmt.Sprintf("request failed (HTTP %d); check authorization, workspace and permissions", e.Status)
 }
 
 type app struct {
 	profile, path string
+	workspace     uint64
 	http          *http.Client
 	out, errOut   io.Writer
 }
@@ -101,6 +118,12 @@ func (a *app) load() (*credentials, error) {
 	c.BaseURL, e = normalizeOrigin(c.BaseURL)
 	if e != nil {
 		return nil, e
+	}
+	if len(c.TenantIDs) == 0 {
+		c.TenantIDs = []uint64{c.TenantID}
+	}
+	if !containsID(c.TenantIDs, c.TenantID) {
+		return nil, errors.New("invalid default workspace; log in again")
 	}
 	return &c, nil
 }
@@ -185,7 +208,13 @@ func (a *app) exchange(ctx context.Context, base string, values url.Values) (*cr
 	if json.Unmarshal(raw, &t) != nil || t.Access == "" || t.Refresh == "" || t.TenantID == 0 || t.ExpiresIn <= 0 {
 		return nil, errors.New("invalid token response")
 	}
-	return &credentials{BaseURL: base, AccessToken: t.Access, RefreshToken: t.Refresh, ExpiresAt: time.Now().Add(time.Duration(t.ExpiresIn) * time.Second), TenantID: t.TenantID, Scope: t.Scope}, nil
+	if len(t.TenantIDs) == 0 {
+		t.TenantIDs = []uint64{t.TenantID}
+	}
+	if !containsID(t.TenantIDs, t.TenantID) {
+		return nil, errors.New("invalid authorized workspaces")
+	}
+	return &credentials{TenantIDs: t.TenantIDs, BaseURL: base, AccessToken: t.Access, RefreshToken: t.Refresh, ExpiresAt: time.Now().Add(time.Duration(t.ExpiresIn) * time.Second), TenantID: t.TenantID, Scope: t.Scope}, nil
 }
 func (a *app) ready(ctx context.Context) (*credentials, error) {
 	c, e := a.load()
@@ -199,8 +228,13 @@ func (a *app) ready(ctx context.Context) (*credentials, error) {
 	if e != nil {
 		return nil, errors.New("session refresh failed; retry once or run flowboom auth login")
 	}
-	if next.TenantID != c.TenantID {
-		return nil, errors.New("refresh changed workspace; log in again")
+	for _, id := range next.TenantIDs {
+		if !containsID(c.TenantIDs, id) {
+			return nil, errors.New("refresh expanded workspaces; log in again")
+		}
+	}
+	if containsID(next.TenantIDs, c.TenantID) {
+		next.TenantID = c.TenantID
 	}
 	if e = a.save(next); e != nil {
 		return nil, e
@@ -212,7 +246,11 @@ func (a *app) api(ctx context.Context, method, path string, body []byte) ([]byte
 	if e != nil {
 		return nil, e
 	}
-	return a.request(ctx, c.BaseURL, method, "/skills"+path, bytes.NewReader(body), "application/json", c.AccessToken, c.TenantID)
+	id, e := a.selectedWorkspace(c)
+	if e != nil {
+		return nil, e
+	}
+	return a.request(ctx, c.BaseURL, method, "/skills"+path, bytes.NewReader(body), "application/json", c.AccessToken, id)
 }
 func openBrowser(link string) {
 	var cmd *exec.Cmd
@@ -268,7 +306,7 @@ func (a *app) login(ctx context.Context, args []string) error {
 	if e != nil || link.Scheme != origin.Scheme || link.Host != origin.Host || link.User != nil || link.Path != "/oauth/device" {
 		return errors.New("verification URL does not match selected site")
 	}
-	fmt.Fprintf(a.errOut, "Profile: %s\nOpen: %s\nDevice code: %s\nChoose your workspace and permissions in the browser. Waiting for authorization…\n", a.profile, d.URI, d.Code)
+	fmt.Fprintf(a.errOut, "Profile: %s\nOpen: %s\nDevice code: %s\nChoose your workspaces and permissions in the browser. Waiting for authorization…\n", a.profile, d.URI, d.Code)
 	if !*noBrowser {
 		openBrowser(d.URI)
 	}
@@ -305,7 +343,7 @@ func (a *app) login(ctx context.Context, args []string) error {
 		if e = a.save(c); e != nil {
 			return e
 		}
-		fmt.Fprintf(a.errOut, "Authorized workspace %d (%s). Credentials saved privately for profile %s.\n", c.TenantID, c.Scope, a.profile)
+		fmt.Fprintf(a.errOut, "Authorized default workspace %d (%s). Credentials saved privately for profile %s.\n", c.TenantID, c.Scope, a.profile)
 		return nil
 	}
 	return errors.New("device code expired; run login again")
@@ -325,7 +363,11 @@ func (a *app) auth(ctx context.Context, args []string) error {
 		if e != nil {
 			return e
 		}
-		raw, e := a.request(ctx, c.BaseURL, "GET", "/skills/identity", nil, "", c.AccessToken, c.TenantID)
+		id, e := a.selectedWorkspace(c)
+		if e != nil {
+			return e
+		}
+		raw, e := a.request(ctx, c.BaseURL, "GET", "/skills/identity", nil, "", c.AccessToken, id)
 		if e != nil {
 			return e
 		}
@@ -335,6 +377,8 @@ func (a *app) auth(ctx context.Context, args []string) error {
 		}
 		result["profile"] = a.profile
 		result["baseUrl"] = c.BaseURL
+		result["authorizedWorkspaceIds"] = c.TenantIDs
+		result["defaultWorkspaceId"] = c.TenantID
 		raw, _ = json.Marshal(result)
 		return a.printJSON(raw)
 	case "logout":
@@ -379,6 +423,9 @@ func (a *app) run(ctx context.Context, args []string) error {
 	if args[0] == "auth" {
 		return a.auth(ctx, args[1:])
 	}
+	if args[0] == "workspaces" {
+		return a.workspaces(ctx, args[1:])
+	}
 	cmd := args[0]
 	rest := args[1:]
 	action := ""
@@ -387,7 +434,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 		rest = rest[1:]
 	}
 	id := ""
-	if (action == "get") && len(rest) > 0 {
+	if (action == "get" || action == "submit-review" || action == "publish") && len(rest) > 0 {
 		var e error
 		id, e = positiveID(rest[0])
 		if e != nil {
@@ -398,6 +445,8 @@ func (a *app) run(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	flags.SetOutput(a.errOut)
 	site := flags.Uint64("site", 0, "site ID")
+	confirm := flags.Bool("confirm", false, "confirm publication of this exact article")
+	workspace := flags.Uint64("workspace", a.workspace, "authorized workspace ID")
 	file := flags.String("file", "", "UTF-8 JSON request file")
 	query := flags.String("query", "", "search query")
 	status := flags.String("status", "", "status filter")
@@ -413,6 +462,16 @@ func (a *app) run(ctx context.Context, args []string) error {
 	if flags.NArg() != 0 {
 		return errors.New("unexpected arguments")
 	}
+	a.workspace = *workspace
+	if cmd == "articles" && (action == "submit-review" || action == "publish") {
+		if id == "" {
+			return errors.New("article ID required")
+		}
+		return a.articleAction(ctx, action, id, *confirm)
+	}
+	if *confirm && !(cmd == "articles" && (action == "schedule" || action == "unschedule")) {
+		return errors.New("--confirm is only valid for article publication or scheduling")
+	}
 	method := "GET"
 	path := ""
 	values := url.Values{}
@@ -421,6 +480,11 @@ func (a *app) run(ctx context.Context, args []string) error {
 	}
 	var body []byte
 	switch cmd {
+	case "publish-tasks":
+		if action != "get" || id == "" {
+			return errors.New("use publish-tasks get ID")
+		}
+		path = "/publish-tasks/" + id
 	case "sources":
 		if action != "list" {
 			return errors.New("use sources list [--site ID] [--page N]")
@@ -442,6 +506,19 @@ func (a *app) run(ctx context.Context, args []string) error {
 		path = "/categories"
 	case "articles", "topics", "briefs":
 		switch action {
+		case "schedule", "unschedule":
+			if cmd != "articles" {
+				return errors.New("scheduling requires articles")
+			}
+			method = "POST"
+			path = "/articles/" + action
+		case "plan":
+			if cmd != "articles" || *site == 0 {
+				return errors.New("use articles plan --site ID")
+			}
+			path = "/publication-plan"
+			values.Set("page", strconv.Itoa(*page))
+			values.Set("pageSize", strconv.Itoa(*size))
 		case "list":
 			path = "/" + cmd
 			values.Set("page", strconv.Itoa(*page))
@@ -525,6 +602,14 @@ func (a *app) run(ctx context.Context, args []string) error {
 			return errors.New("request file must contain valid JSON, at most 1 MiB")
 		}
 	}
+	if cmd == "articles" && (action == "schedule" || action == "unschedule") {
+		var input map[string]json.RawMessage
+		if json.Unmarshal(body, &input) != nil || input == nil {
+			return errors.New("plan file must contain a JSON object")
+		}
+		input["confirm"], _ = json.Marshal(*confirm)
+		body, _ = json.Marshal(input)
+	}
 	if method == "GET" && len(values) > 0 {
 		path += "?" + values.Encode()
 	}
@@ -537,7 +622,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 
 const help = `Flowboom CLI — content operations for Codex and WorkBuddy
 
-flowboom [--profile cn|global] COMMAND
+flowboom [--profile cn|global] [--workspace ID] COMMAND
 
 Profiles: cn=https://cloud.flowboom.cn (default)
           global=https://cloud.flowboom.io (deployment pending)
@@ -545,12 +630,19 @@ Credentials and workspace authorization are isolated per profile.
 
   auth login [--no-browser] [--read-only] [--base-url HTTPS_ORIGIN]
   auth status | auth logout
+  workspaces list | workspaces use ID
   sites list
   sources list [--site ID] [--page N] [--status STATUS]
   categories list --site ID
   articles list [--site ID] [--status STATUS] [--query TEXT] [--page N]
   articles get ID
   articles create --file article.json
+  articles submit-review ID
+  articles publish ID [--confirm]
+  articles schedule --file plan.json [--confirm]
+  articles unschedule --file selection.json [--confirm]
+  articles plan --site ID [--page N]
+  publish-tasks get ID
   topics list [--site ID] [--status STATUS]
   topics create --file topic.json
   briefs list [--site ID] [--page N]
@@ -562,7 +654,10 @@ Credentials and workspace authorization are isolated per profile.
   seo opportunities --site ID [--status STATUS]
 
 API results are JSON. Tokens are never printed. Writes are never retried.
-Publishing, paid task execution and customer outreach are managed in the web app.
+Publish/schedule/unschedule without --confirm only previews the exact targets.
+Scheduling uses the site enabled publish_sweep pipeline; due articles publish on its next run.
+Canceling a ready article plan returns it to draft to prevent unintended automatic publication.
+Review approval, paid generation and customer outreach remain in the web app.
 `
 
 func main() {
@@ -573,6 +668,7 @@ func main() {
 		defaultProfile = "cn"
 	}
 	profile := root.String("profile", defaultProfile, "cn or global")
+	workspace := root.Uint64("workspace", 0, "authorized workspace ID")
 	if e := root.Parse(os.Args[1:]); e != nil {
 		if e == flag.ErrHelp {
 			fmt.Print(help)
@@ -582,6 +678,7 @@ func main() {
 	}
 	a, e := newApp(*profile)
 	if e == nil {
+		a.workspace = *workspace
 		ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
 		defer cancel()
 		e = a.run(ctx, root.Args())
@@ -590,4 +687,106 @@ func main() {
 		fmt.Fprintln(os.Stderr, e)
 		os.Exit(1)
 	}
+}
+
+func containsID(ids []uint64, id uint64) bool {
+	for _, v := range ids {
+		if v == id && id != 0 {
+			return true
+		}
+	}
+	return false
+}
+func (a *app) selectedWorkspace(c *credentials) (uint64, error) {
+	id := c.TenantID
+	if a.workspace != 0 {
+		id = a.workspace
+	}
+	if !containsID(c.TenantIDs, id) {
+		return 0, errors.New("workspace not authorized; choose an authorized workspace or log in again")
+	}
+	return id, nil
+}
+func (a *app) workspaces(ctx context.Context, args []string) error {
+	if len(args) == 1 && args[0] == "list" {
+		c, e := a.ready(ctx)
+		if e != nil {
+			return e
+		}
+		raw, e := a.request(ctx, c.BaseURL, "GET", "/skills/workspaces", nil, "", c.AccessToken, 0)
+		if e != nil {
+			return e
+		}
+		return a.printJSON(raw)
+	}
+	if len(args) != 2 || args[0] != "use" {
+		return errors.New("use workspaces list or workspaces use ID")
+	}
+	rawID, e := positiveID(args[1])
+	if e != nil {
+		return e
+	}
+	id, _ := strconv.ParseUint(rawID, 10, 64)
+	c, e := a.ready(ctx)
+	if e != nil {
+		return e
+	}
+	if !containsID(c.TenantIDs, id) {
+		return errors.New("workspace not authorized; log in again to add it")
+	}
+	if _, e = a.request(ctx, c.BaseURL, "GET", "/skills/identity", nil, "", c.AccessToken, id); e != nil {
+		return e
+	}
+	c.TenantID = id
+	if e = a.save(c); e != nil {
+		return e
+	}
+	fmt.Fprintf(a.errOut, "Default workspace set to %d for profile %s.\n", id, a.profile)
+	return nil
+}
+func (a *app) articleAction(ctx context.Context, action, id string, confirm bool) error {
+	if action == "submit-review" {
+		raw, e := a.api(ctx, "POST", "/articles/"+id+"/submit-review", []byte(`{}`))
+		if e != nil {
+			return e
+		}
+		return a.printJSON(raw)
+	}
+	raw, e := a.api(ctx, "GET", "/articles/"+id, nil)
+	if e != nil {
+		return e
+	}
+	var article struct {
+		Data struct {
+			ID     uint64 `json:"id"`
+			SiteID uint64 `json:"siteId"`
+			Title  string `json:"title"`
+			Status string `json:"status"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &article) != nil || strconv.FormatUint(article.Data.ID, 10) != id {
+		return errors.New("invalid article response")
+	}
+	c, e := a.load()
+	if e != nil {
+		return e
+	}
+	workspace, e := a.selectedWorkspace(c)
+	if e != nil {
+		return e
+	}
+	preview := map[string]any{"profile": a.profile, "workspaceId": workspace, "articleId": article.Data.ID, "siteId": article.Data.SiteID, "title": article.Data.Title, "status": article.Data.Status, "confirmationRequired": true}
+	if !confirm {
+		out, _ := json.Marshal(map[string]any{"data": preview})
+		return a.printJSON(out)
+	}
+	if article.Data.Status != "ready" {
+		return errors.New("article must pass review before publishing; approval remains in the web app")
+	}
+	fmt.Fprintf(a.errOut, "Publishing article %s in workspace %d, site %d.\n", id, workspace, article.Data.SiteID)
+	raw, e = a.api(ctx, "POST", "/articles/"+id+"/publish", []byte(`{"confirm":true}`))
+	if e != nil {
+		return e
+	}
+	return a.printJSON(raw)
 }
