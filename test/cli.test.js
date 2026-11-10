@@ -281,3 +281,22 @@ test('revision review and publication require explicit confirmation and never po
  await f.app.run(['revisions','publish','12']);assert.equal(f.requests.length,1);
  await f.app.run(['revisions','publish','12','--confirm']);assert.equal(f.requests.at(-1).path,'/api/v1/skills/revisions/12/publish');
 });
+
+
+test('multi-workspace PAT keeps explicit consent and allows selecting a saved or environment workspace',async t=>{
+ const token='fbp_'+'C'.repeat(52);
+ const f=await fixture(t,(req,res)=>{
+  if(req.url==='/api/v1/skills/workspaces')return res.end(JSON.stringify({data:[{id:7},{id:8}]}));
+  if(req.url==='/api/v1/skills/identity')return res.end(JSON.stringify({data:{authorizationKind:'pat',tenant:{id:Number(req.headers['x-tenant-id'])},tenantIds:[7,8],scope:'flowboom.read',expiresAt:'2099-01-01T00:00:00Z'}}));
+  return res.end('{"data":[]}');
+ },{input:(async function*(){yield token+'\n'})()});
+ await f.app.run(['--workspace','7','auth','login','--pat-stdin','--base-url',f.base]);
+ assert.deepEqual((await f.app.load()).tenantIds,[7,8]);
+ await f.app.run(['workspaces','use','8']);assert.equal((await f.app.load()).tenantId,8);
+ await f.app.run(['sites','list']);assert.equal(f.requests.at(-1).tenant,'8');
+ await assert.rejects(f.app.run(['--workspace','9','sites','list']),/not authorized/);
+ f.app.env={FLOWBOOM_PAT:token,FLOWBOOM_BASE_URL:f.base,FLOWBOOM_WORKSPACE:'7'};
+ await f.app.run(['--workspace','8','sites','list']);assert.equal(f.requests.at(-1).tenant,'8');
+ await assert.rejects(f.app.run(['--workspace','9','sites','list']),/not authorized/);
+ assert(!f.requests.some(r=>r.path.includes('/oauth/')));assert(!f.out.value.includes(token));assert(!f.err.value.includes(token));
+});

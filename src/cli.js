@@ -60,7 +60,9 @@ function credentials(raw) {
   if (raw?.kind === 'pat') {
     if (!/^fbp_[A-Z2-7]{52}$/.test(raw.accessToken ?? '') || typeof raw.scope !== 'string' || !Number.isFinite(Date.parse(raw.expiresAt))) throw new Error('Invalid PAT credentials.');
     const tenantId = numericID(raw.tenantId);
-    return { kind: 'pat', baseUrl: normalizeOrigin(raw.baseUrl), accessToken: raw.accessToken, expiresAt: raw.expiresAt, tenantId, tenantIds: [tenantId], scope: raw.scope };
+    const tenantIds = raw.tenantIds?.length ? raw.tenantIds.map(numericID) : [tenantId];
+    if (!hasID(tenantIds, tenantId)) throw new Error('Workspace not authorized; log in again.');
+    return { kind: 'pat', baseUrl: normalizeOrigin(raw.baseUrl), accessToken: raw.accessToken, expiresAt: raw.expiresAt, tenantId, tenantIds, scope: raw.scope };
   }
   if (!raw || typeof raw.accessToken !== 'string' || !raw.accessToken || typeof raw.refreshToken !== 'string' || !raw.refreshToken || typeof raw.scope !== 'string' || !Number.isFinite(Date.parse(raw.expiresAt))) throw new Error('Invalid credentials; log in again.');
   const tenantId = numericID(raw.tenantId);
@@ -149,7 +151,13 @@ export class App {
     if (this.env.FLOWBOOM_PAT) {
       if (!/^fbp_[A-Z2-7]{52}$/.test(this.env.FLOWBOOM_PAT) || !this.env.FLOWBOOM_BASE_URL || !this.env.FLOWBOOM_WORKSPACE) throw new Error('PAT requires FLOWBOOM_PAT, FLOWBOOM_BASE_URL and FLOWBOOM_WORKSPACE.');
       const tenantId = numericID(this.env.FLOWBOOM_WORKSPACE);
-      return { kind: 'pat', ephemeral: true, baseUrl: normalizeOrigin(this.env.FLOWBOOM_BASE_URL), accessToken: this.env.FLOWBOOM_PAT, tenantId, tenantIds: [tenantId] };
+      const c = { kind: 'pat', ephemeral: true, baseUrl: normalizeOrigin(this.env.FLOWBOOM_BASE_URL), accessToken: this.env.FLOWBOOM_PAT, tenantId, tenantIds: [tenantId] };
+      if (this.workspace && String(this.workspace) !== String(tenantId)) {
+        const response = await this.request(c.baseUrl, 'GET', '/skills/workspaces', { token: c.accessToken });
+        if (!Array.isArray(response?.data)) throw new Error('Workspace not authorized; check PAT scope.');
+        c.tenantIds = response.data.map(row => numericID(row.id));
+      }
+      return c;
     }
     const c = await this.load();
     if (c.kind === 'pat') {
@@ -180,7 +188,7 @@ export class App {
       const response = await this.request(baseUrl, 'GET', '/skills/identity', { token, tenant: this.workspace });
       const data = response?.data;
       if (data?.authorizationKind !== 'pat' || String(data?.tenant?.id) !== String(this.workspace)) throw new Error('Invalid PAT identity response.');
-      await this.save(credentials({ kind: 'pat', baseUrl, accessToken: token, tenantId: this.workspace, scope: data.scope, expiresAt: data.expiresAt }));
+      await this.save(credentials({ kind: 'pat', baseUrl, accessToken: token, tenantId: this.workspace, tenantIds: data.tenantIds, scope: data.scope, expiresAt: data.expiresAt }));
       this.err.write('PAT saved privately; revoke or replace it in Flowboom before expiry.\n');
       return;
     }
