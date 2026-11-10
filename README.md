@@ -150,4 +150,4 @@ Permissions are independent: `flowboom.articles.revise`, `flowboom.articles.agen
 
 After confirmation, candidate changes and the existing publish task are saved atomically. A queued task is not an online result. Deployment failure uses existing retry/recovery behavior; the original snapshot remains available for operator recovery, with no automatic deployment rollback guarantee. Do not retry ambiguous writes blindly.
 
-Rollout requires the matching backend, migrations 000079/000080, growth worker and browser build before using the new CLI defaults. Older servers may reject granular scope requests.
+Rollout requires the matching backend, migrations 000079/000080, browser build before using the new CLI defaults. Older servers may reject granular scope requests.
