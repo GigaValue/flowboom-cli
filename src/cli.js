@@ -9,7 +9,7 @@ import { parseJSON, stringifyJSON } from './json.js';
 
 export const origins = Object.freeze({ cn: 'https://cloud.flowboom.cn', global: 'https://cloud.flowboom.io' });
 const clientID = 'flowboom-cli'; // Keep the deployed OAuth protocol ID; executable/package are flowboom.
-const scopes = 'flowboom.read flowboom.knowledge flowboom.drafts flowboom.publish';
+const scopes = 'flowboom.read flowboom.knowledge flowboom.articles.create flowboom.articles.update flowboom.articles.revise flowboom.articles.agent-review flowboom.articles.submit-review flowboom.articles.publish flowboom.articles.schedule';
 const MAX_RESPONSE = 8 * 1024 * 1024;
 const MAX_FILE = 1024 * 1024;
 const safeErrors = new Map([
@@ -57,6 +57,11 @@ export function configPath(profile, env = process.env, platform = process.platfo
   return paths.join(dir, 'flowboom', `${profile}.json`);
 }
 function credentials(raw) {
+  if (raw?.kind === 'pat') {
+    if (!/^fbp_[A-Z2-7]{52}$/.test(raw.accessToken ?? '') || typeof raw.scope !== 'string' || !Number.isFinite(Date.parse(raw.expiresAt))) throw new Error('Invalid PAT credentials.');
+    const tenantId = numericID(raw.tenantId);
+    return { kind: 'pat', baseUrl: normalizeOrigin(raw.baseUrl), accessToken: raw.accessToken, expiresAt: raw.expiresAt, tenantId, tenantIds: [tenantId], scope: raw.scope };
+  }
   if (!raw || typeof raw.accessToken !== 'string' || !raw.accessToken || typeof raw.refreshToken !== 'string' || !raw.refreshToken || typeof raw.scope !== 'string' || !Number.isFinite(Date.parse(raw.expiresAt))) throw new Error('Invalid credentials; log in again.');
   const tenantId = numericID(raw.tenantId);
   const tenantIds = raw.tenantIds?.length ? raw.tenantIds.map(numericID) : [tenantId];
@@ -70,13 +75,13 @@ function browserOpen(url) {
   child.unref();
 }
 const options = Object.fromEntries(['profile', 'workspace', 'base-url', 'site', 'file', 'query', 'status', 'page', 'page-size', 'from', 'to', 'engine', 'source'].map(name => [name, { type: 'string' }]));
-for (const name of ['confirm', 'no-browser', 'read-only', 'help', 'version']) options[name] = { type: 'boolean' };
+for (const name of ['confirm', 'no-browser', 'read-only', 'pat-stdin', 'help', 'version']) options[name] = { type: 'boolean' };
 options.help.short = 'h';
 options.version.short = 'v';
 
 export class App {
-  constructor({ env = process.env, configDir, out = process.stdout, err = process.stderr, fetchImpl = globalThis.fetch, signal, sleepImpl = sleep, openBrowser = browserOpen, now = Date.now } = {}) {
-    Object.assign(this, { env, configDir, out, err, fetch: fetchImpl, signal, sleep: sleepImpl, openBrowser, now });
+  constructor({ env = process.env, configDir, out = process.stdout, err = process.stderr, fetchImpl = globalThis.fetch, signal, sleepImpl = sleep, openBrowser = browserOpen, now = Date.now, input = process.stdin } = {}) {
+    Object.assign(this, { env, configDir, out, err, fetch: fetchImpl, signal, sleep: sleepImpl, openBrowser, now, input });
     this.profile = env.FLOWBOOM_PROFILE || 'cn';
     this.workspace = undefined;
   }
@@ -141,7 +146,16 @@ export class App {
     catch { throw new Error('Invalid token response.'); }
   }
   async ready() {
+    if (this.env.FLOWBOOM_PAT) {
+      if (!/^fbp_[A-Z2-7]{52}$/.test(this.env.FLOWBOOM_PAT) || !this.env.FLOWBOOM_BASE_URL || !this.env.FLOWBOOM_WORKSPACE) throw new Error('PAT requires FLOWBOOM_PAT, FLOWBOOM_BASE_URL and FLOWBOOM_WORKSPACE.');
+      const tenantId = numericID(this.env.FLOWBOOM_WORKSPACE);
+      return { kind: 'pat', ephemeral: true, baseUrl: normalizeOrigin(this.env.FLOWBOOM_BASE_URL), accessToken: this.env.FLOWBOOM_PAT, tenantId, tenantIds: [tenantId] };
+    }
     const c = await this.load();
+    if (c.kind === 'pat') {
+      if (Date.parse(c.expiresAt) <= this.now()) throw new Error('PAT expired; create a replacement in Flowboom.');
+      return c;
+    }
     if (Date.parse(c.expiresAt) - this.now() > 60000) return c;
     let next;
     try { next = await this.exchange(c.baseUrl, { grant_type: 'refresh_token', refresh_token: c.refreshToken }); }
@@ -157,6 +171,19 @@ export class App {
   }
   print(value) { this.out.write(`${stringifyJSON(value, 2)}\n`); }
   async login(flags) {
+    if (flags['pat-stdin']) {
+      if (!this.workspace) throw new Error('--workspace is required for PAT login.');
+      let token = ''; for await (const chunk of this.input) { token += chunk.toString(); if (token.length > 256) throw new Error('Invalid PAT input.'); }
+      token = token.trim();
+      if (!/^fbp_[A-Z2-7]{52}$/.test(token)) throw new Error('Invalid PAT input.');
+      const baseUrl = normalizeOrigin(flags['base-url'] ?? origins[this.profile]);
+      const response = await this.request(baseUrl, 'GET', '/skills/identity', { token, tenant: this.workspace });
+      const data = response?.data;
+      if (data?.authorizationKind !== 'pat' || String(data?.tenant?.id) !== String(this.workspace)) throw new Error('Invalid PAT identity response.');
+      await this.save(credentials({ kind: 'pat', baseUrl, accessToken: token, tenantId: this.workspace, scope: data.scope, expiresAt: data.expiresAt }));
+      this.err.write('PAT saved privately; revoke or replace it in Flowboom before expiry.\n');
+      return;
+    }
     const base = normalizeOrigin(flags['base-url'] ?? origins[this.profile]);
     const d = await this.form(base, '/oauth/device/code', { scope: flags['read-only'] ? 'flowboom.read flowboom.knowledge' : scopes });
     if (typeof d?.device_code !== 'string' || !d.device_code || !/^[A-Z2-7]{4}-[A-Z2-7]{4}$/.test(d.user_code) || !Number.isSafeInteger(d.expires_in) || d.expires_in < 1 || d.expires_in > 900 || !Number.isSafeInteger(d.interval) || d.interval < 1 || d.interval > d.expires_in) throw new Error('Invalid device authorization response.');
@@ -197,7 +224,13 @@ export class App {
       return;
     }
     if (action === 'logout') {
-      const c = await this.load();
+      const c = this.env.FLOWBOOM_PAT ? await this.ready() : await this.load();
+      if (c.kind === 'pat') {
+        await this.request(c.baseUrl, 'DELETE', '/skills/token', { token: c.accessToken, tenant: this.selected(c) });
+        if (!c.ephemeral) await fs.unlink(this.credentialPath);
+        this.err.write('PAT revoked. Remove any remaining environment variable or secret file.\n');
+        return;
+      }
       await this.form(c.baseUrl, '/oauth/revoke', { token: c.refreshToken }).catch(() => { throw new Error('Server revocation failed; local credentials retained. Retry logout or revoke in the browser.'); });
       await fs.unlink(this.credentialPath).catch(() => { throw new Error('Revoked on server but local credential cleanup failed.'); });
       this.err.write('Logged out; server authorization revoked.\n');
@@ -213,14 +246,16 @@ export class App {
     if (!hasID(c.tenantIds, id)) throw new Error('Workspace not authorized; log in again to add it.');
     await this.request(c.baseUrl, 'GET', '/skills/identity', { token: c.accessToken, tenant: id });
     c.tenantId = id;
-    await this.save(c);
+    if (!c.ephemeral) await this.save(c);
     this.err.write(`Default workspace set to ${id} for profile ${this.profile}.\n`);
   }
   async articleAction(action, id, confirm) {
     if (action === 'submit-review') { this.print(await this.api('POST', `/articles/${id}/submit-review`, {})); return; }
+    const credential = await this.ready();
+    if (confirm && (credential.kind === 'pat' || !credential.scope.split(' ').includes('flowboom.read'))) { this.print(await this.api('POST', `/articles/${id}/publish`, { confirm: true })); return; }
     const { data: article } = await this.api('GET', `/articles/${id}`);
     if (!article || String(article.id) !== id) throw new Error('Invalid article response.');
-    const c = await this.load();
+    const c = await this.ready();
     const workspace = this.selected(c);
     if (!confirm) { this.print({ data: { profile: this.profile, workspaceId: workspace, articleId: article.id, siteId: article.siteId, title: article.title, status: article.status, confirmationRequired: true } }); return; }
     if (article.status !== 'ready') throw new Error('Article must pass review before publishing; approval remains in the web app.');
@@ -251,14 +286,14 @@ export class App {
       if ((action === 'list' && rawID) || !['list', 'use'].includes(action)) throw new Error('Use workspaces list or workspaces use ID.');
       return this.workspaces(action, rawID);
     }
-    const requiresID = ['get', 'update', 'submit-review', 'publish'].includes(action);
+    const requiresID = ['get', 'update', 'revise', 'revisions', 'review', 'submit-review', 'publish'].includes(action);
     const id = requiresID && rawID ? positiveID(rawID) : undefined;
     if (rawID && !requiresID) throw new Error('Unexpected arguments.');
     if (command === 'articles' && ['submit-review', 'publish'].includes(action)) {
       if (!id) throw new Error('Article ID required.');
       return this.articleAction(action, id, !!flags.confirm);
     }
-    if (flags.confirm && !(command === 'articles' && ['schedule', 'unschedule'].includes(action))) throw new Error('--confirm is only valid for article publication or scheduling.');
+    if (flags.confirm && !(command === 'articles' && ['schedule', 'unschedule'].includes(action)) && !(command === 'revisions' && ['review','publish'].includes(action))) throw new Error('--confirm is only valid for article publication or scheduling.');
     const site = flags.site === undefined ? undefined : numericID(flags.site);
     let endpoint, method = 'GET', body;
     const query = new URLSearchParams();
@@ -276,6 +311,8 @@ export class App {
           if (flags.query) query.set('q', flags.query); if (flags.status) query.set('status', flags.status);
         } else if (action === 'get' && id && command !== 'topics') endpoint = `/${command}/${id}`;
         else if (command === 'articles' && action === 'update' && id) { method = 'PATCH'; endpoint = `/articles/${id}`; }
+        else if (command === 'articles' && action === 'revisions' && id) { endpoint = `/articles/${id}/revisions`; }
+        else if (command === 'articles' && action === 'revise' && id) { method = 'POST'; endpoint = `/articles/${id}/revisions`; }
         else if (action === 'create' && command !== 'briefs') { method = 'POST'; endpoint = `/${command}`; }
         else if (action === 'from-knowledge' && command === 'briefs') { method = 'POST'; endpoint = '/knowledge/briefs'; }
         else if (command === 'articles' && ['schedule', 'unschedule'].includes(action)) { method = 'POST'; endpoint = `/articles/${action}`; }
@@ -292,7 +329,17 @@ export class App {
         if (action === 'report') { query.set('engine', flags.engine ?? 'google'); query.set('source', flags.source ?? 'ga4'); if (flags.from) query.set('from', flags.from); if (flags.to) query.set('to', flags.to); }
         else if (flags.status) query.set('status', flags.status);
         break;
+      case 'revisions':
+        if (action === 'get' && id) endpoint = `/revisions/${id}`;
+        else if (action === 'review' && id) { method = 'POST'; endpoint = `/revisions/${id}/review`; }
+        else if (action === 'publish' && id) { method = 'POST'; endpoint = `/revisions/${id}/publish`; }
+        else throw new Error('Use revisions get, review or publish ID.');
+        break;
       default: throw new Error('Unknown command; run flowboom help.');
+    }
+    if (command === 'revisions' && ['review','publish'].includes(action)) {
+      if (!flags.confirm) { this.print({ preview: true, action, profile: this.profile, workspaceId: this.selected(await this.ready()), revisionId: id, confirmationRequired: true }); return; }
+      body = { confirm: true };
     }
     if (['POST', 'PATCH'].includes(method) && body === undefined) {
       if (!flags.file) throw new Error('--file is required.');
@@ -316,8 +363,11 @@ flowboom [--profile cn|global] [--workspace ID] COMMAND
 Profiles: cn=https://cloud.flowboom.cn (default)
           global=https://cloud.flowboom.io (deployment pending)
 
-  auth login [--no-browser] [--read-only] [--base-url HTTPS_ORIGIN]
+  auth login [--no-browser] [--read-only] [--pat-stdin] [--base-url HTTPS_ORIGIN]
   auth status | auth logout
+  articles revise ID --file revision.json
+  articles revisions ID
+  revisions get ID | review ID [--confirm] | publish ID [--confirm]
   upgrade
   workspaces list | workspaces use ID
   sites list
@@ -347,7 +397,9 @@ API results are JSON. Tokens are never printed. Writes are never retried.
 Publish/schedule/unschedule without --confirm only previews the exact targets.
 Scheduling uses the site's enabled publish_sweep pipeline; due articles publish on its next run.
 Canceling a ready article plan returns it to draft to prevent unintended automatic publication.
-Review approval, paid generation and customer outreach remain in the web app.
+Published revisions require platform agent review; callers cannot supply approval.
+PAT: FLOWBOOM_PAT + FLOWBOOM_BASE_URL + FLOWBOOM_WORKSPACE, or auth login --pat-stdin --workspace ID.
+PATs never refresh. Paid generation and customer outreach remain in the web app.
 `;
 
 // Fixed official source; no credentials or user-controlled shell arguments.

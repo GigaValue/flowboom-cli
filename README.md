@@ -21,7 +21,7 @@ npm exec --package github:GigaValue/flowboom-cli -- flowboom auth login
 
 The executable is always `flowboom`, including on Windows. npm registry publication is pending; after `flowboom` is published, the equivalent commands are `npm install -g flowboom` and `npx flowboom`. For a local checkout, use `npm link` or `node bin/flowboom.js help`.
 
-Login opens the Flowboom browser page, where you sign in, compare the device code, select workspaces and approve optional knowledge/draft/publication permissions. Passwords and captcha stay in the browser. For an agent/remote terminal, use `flowboom auth login --no-browser` and open the printed URL yourself. Do not put passwords or tokens into prompts.
+Login opens the Flowboom browser page, where you sign in, compare the device code, select workspaces and independently approve read, knowledge, create, edit, revise, agent review, submit review, publish and schedule permissions. Passwords and captcha stay in the browser. For an agent/remote terminal, use `flowboom auth login --no-browser` and open the printed URL yourself. Do not put passwords or tokens into prompts.
 
 **Deployment prerequisite:** the selected Flowboom site must deploy the device OAuth and Skills API documented in [the protocol](docs/api.md). This repository does not deploy those services. A site that lacks them will return an error rather than pretend login succeeded.
 
@@ -90,7 +90,7 @@ flowboom --workspace 12 articles publish 34 --confirm # queue a reviewed ready a
 flowboom --workspace 12 publish-tasks get 56
 ```
 
-Submission/publication requires separately checked `flowboom.publish` browser consent and existing `content.write` permission. Existing tokens never gain this scope automatically. Re-login to grant it. Publication retains SEO/content-pack review checks and does not offer force or approval commands. A returned task means queued, not published. Writes are not retried; inspect task/article state after an ambiguous failure and use the web workflow for recovery. Legacy single-workspace credentials remain usable.
+Submission/publication requires separately checked `flowboom.articles.submit-review` / `flowboom.articles.publish` browser consent (legacy `flowboom.publish` remains valid) and existing `content.write` permission. Existing tokens never gain this scope automatically. Re-login to grant it. Publication retains SEO/content-pack review checks and does not offer force or approval commands. A returned task means queued, not published. Writes are not retried; inspect task/article state after an ambiguous failure and use the web workflow for recovery. Legacy single-workspace credentials remain usable.
 
 ## Batch publication plans
 
@@ -118,6 +118,36 @@ flowboom upgrade
 {"title":"Updated title","contentMarkdown":"# Updated article","summary":""}
 ```
 
-Editable fields: title, slug, summary, contentMarkdown, seoTitle, seoDescription and categoryId. Omitted/null fields stay unchanged; empty strings clear optional text. Only unpublished draft/rejected articles can be edited. Reviewed, reviewing, publishing and published articles are rejected. Managed translations must be edited in the web app. Draft scope and content.write permission are required; changes never grant approval. Editing requires a server version that exposes the draft PATCH endpoint.
+Editable fields: title, slug, summary, contentMarkdown, seoTitle, seoDescription and categoryId. Omitted/null fields stay unchanged; empty strings clear optional text. Only unpublished draft/rejected articles can be edited. Reviewed, reviewing, publishing and published articles are rejected. Managed translations must be edited in the web app. `flowboom.articles.update` (or legacy draft scope) and content.write permission are required; changes never grant approval. Editing requires a server version that exposes the draft PATCH endpoint.
 
 `flowboom upgrade` runs `npm install --global github:GigaValue/flowboom-cli` using npm's configured global prefix. Use it for a global npm installation; local/npx/source checkouts should be updated through their original installation method. npm must be available and its global directory writable. No sudo or credential reset is performed.
+
+## Granular authorization and unattended agents
+
+New browser login requests independent permissions. Content read is optional for a grant containing an individual write permission. Existing legacy grants retain their original rights and never gain published revision or agent review rights automatically. Re-login to change consent. Site discovery and identity do not grant content read.
+
+PATs are created in Settings for one workspace and one active site. Choose only necessary permissions; the secret is displayed once, stored hashed by the server, expires after 1–365 days and can be revoked with its audit history visible. PATs do not refresh. Replace before expiry, then revoke the old token. Membership, account and role checks remain live. PATs cannot access knowledge or management APIs.
+
+For a secret injected by your process manager, set `FLOWBOOM_PAT`, `FLOWBOOM_BASE_URL` and `FLOWBOOM_WORKSPACE` together. The explicit HTTPS origin prevents sending the secret to another profile. Environment credentials are not saved. Alternatively pipe a protected secret file into `flowboom --workspace ID auth login --pat-stdin --base-url HTTPS_ORIGIN`; never paste the secret into a command argument or an AI prompt. This stores a private credential file without a refresh token. `auth logout` revokes the PAT; also remove any injected environment secret.
+
+## Updating published articles
+
+Hexo/Astro standalone articles support a separate revision workflow:
+
+```sh
+flowboom articles get ARTICLE_ID
+flowboom articles revise ARTICLE_ID --file revision.json
+flowboom articles revisions ARTICLE_ID
+flowboom revisions review REVISION_ID --confirm
+flowboom revisions get REVISION_ID
+flowboom revisions publish REVISION_ID --confirm
+flowboom publish-tasks get TASK_ID
+```
+
+`revision.json` contains `expectedRevision` from the article, changed `title`, `summary`, `contentMarkdown`, `seoTitle` or `seoDescription`, and required `evidence` explaining factual sources. Site, slug and category cannot change. Complete baseline, candidate and evidence must fit 50KB; large inputs fail rather than silently truncate. Creation leaves the master article unchanged. WordPress, content packs and managed translations use their existing workflows.
+
+Permissions are independent: `flowboom.articles.revise`, `flowboom.articles.agent-review`, `flowboom.articles.publish`; reads require `flowboom.read`. Agent review also needs `assistant.use` and `content.write`. Review uses the platform agent and may incur its normal model usage. Callers cannot submit a verdict, run ID or force flag. Only a successful review matching the exact candidate can approve it; factual, readability or safety holds block publication. A changed baseline also blocks publication. Review/publish without `--confirm` only previews the requested action and performs no write.
+
+After confirmation, candidate changes and the existing publish task are saved atomically. A queued task is not an online result. Deployment failure uses existing retry/recovery behavior; the original snapshot remains available for operator recovery, with no automatic deployment rollback guarantee. Do not retry ambiguous writes blindly.
+
+Rollout requires the matching backend, migrations 000079/000080, growth worker and browser build before using the new CLI defaults. Older servers may reject granular scope requests.

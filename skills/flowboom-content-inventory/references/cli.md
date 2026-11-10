@@ -68,3 +68,10 @@ HTTP/网络失败不自动重发创建请求。文章/选题超时后先按标�
 `articles plan --site ID --page 1` 查看计划与站点启用的 publish_sweep 调度。到期文章由现有统一发布流水线下次运行处理，并非独立精确计时器；cron 使用服务现有 Asia/Shanghai 时区。站点没有启用该流水线时，确认保存失败，提示去网页配置，不自行创建/开启全站自动发布。计划不代替审核，流水线停用/服务不可用会延后，不能承诺准点上线。
 
 取消用 `articles unschedule --file selection.json` 预览，文件为 `{"siteId":1,"articleIds":[11,12]}`；确认范围后加 `--confirm`。取消会清空排期并将 ready 文章退回 draft，防止下次全站扫描立即发出，后续发布需重新审核。已经 publishing/published 的文章不能通过取消排期撤回。计划设置沿用浏览器 flowboom.publish 授权与当前 content.write，持久计划按现有流水线执行，不随 CLI 退出登录自动取消。
+
+
+# 细粒度授权与旧文修订
+
+新版浏览器授权分别选择读取、创建、编辑草稿、创建旧文修订、请求 agent 审核、提交审核、发布和排期；旧 scopes 保持兼容但不会自动获得旧文修订权限。只写授权不强制内容读取；读取命令缺权限时明确报告。PAT 仅绑定一个工作空间和站点，不支持知识接口，无 refresh；由用户在设置中创建并通过受保护 stdin 或进程环境配置，禁止向用户索取或展示 secret。具体配置见包内 README。
+
+Hexo/Astro 独立已发布文章使用 `articles revise ID --file revision.json`，必填 expectedRevision、evidence 和变更字段；仅允许标题、摘要、正文和 SEO 字段。`articles revisions ID` 列表，`revisions get ID` 查询。获得用户明确授权后，可执行 `revisions review ID --confirm` 请求平台 agent 审核，再于 approved 状态执行 `revisions publish ID --confirm`。不带 confirm 只预览。分别需要 articles.revise / articles.agent-review / articles.publish scopes（均前缀 flowboom.）；agent 审核另需 assistant.use。不能自填审核结论、run ID 或 force。原稿变化或审核 hold 会阻断发布。返回任务不代表上线；发布失败保留快照供恢复，不保证自动回滚。完整协议与兼容性以包内 docs/api.md 和 README 为准。

@@ -242,3 +242,42 @@ test('upgrade installs the fixed official source and reports npm failure', async
     else await assert.rejects(upgrade(run), /Upgrade failed/);
   }
 });
+
+test('PAT environment stays unattended, origin-pinned and never refreshed or printed', async t => {
+  const token='fbp_'+ 'A'.repeat(52);
+  const f=await fixture(t,(_req,res)=>res.end('{"data":[]}'));
+  f.app.env={FLOWBOOM_PAT:token,FLOWBOOM_BASE_URL:f.base,FLOWBOOM_WORKSPACE:'7'};
+  await f.app.run(['sites','list']);
+  assert.equal(f.requests[0].token,`Bearer ${token}`);assert.equal(f.requests[0].tenant,'7');
+  assert(!f.out.value.includes(token));assert(!f.err.value.includes(token));assert(!f.requests.some(r=>r.path.includes('/oauth/')));
+  await assert.rejects(f.app.run(['--workspace','8','sites','list']),/not authorized/);
+  delete f.app.env.FLOWBOOM_BASE_URL;
+  await assert.rejects(f.app.run(['sites','list']),/PAT requires/);
+});
+
+test('PAT stdin login saves private credentials, skips refresh, and logout revokes only that PAT', async t => {
+  const token='fbp_'+'B'.repeat(52);
+  const f=await fixture(t,(req,res)=>{
+    if(req.url==='/api/v1/skills/identity')return res.end(JSON.stringify({data:{authorizationKind:'pat',tenant:{id:7},scope:'flowboom.read',expiresAt:'2099-01-01T00:00:00Z'}}));
+    if(req.url==='/api/v1/skills/token'&&req.method==='DELETE')return res.end('{}');
+    throw new Error('Unexpected API route');
+  },{input:(async function*(){yield token+'\n';})()});
+  await f.app.run(['--workspace','7','auth','login','--pat-stdin','--base-url',f.base]);
+  const saved=JSON.parse(await fs.readFile(f.app.credentialPath,'utf8'));
+  assert.equal(saved.kind,'pat');assert.equal(saved.accessToken,token);assert.equal(saved.refreshToken,undefined);
+  await f.app.run(['auth','status']);
+  assert(!f.out.value.includes(token));assert(!f.err.value.includes(token));
+  assert(!f.requests.some(r=>r.path.includes('/oauth/')));
+  await f.app.run(['auth','logout']);
+  assert.equal(f.requests.at(-1).method,'DELETE');
+  await assert.rejects(fs.stat(f.app.credentialPath));
+});
+
+test('revision review and publication require explicit confirmation and never post a client verdict',async t=>{
+ const f=await fixture(t,(_req,res)=>res.end('{"data":{"id":12}}'));
+ await f.app.run(['revisions','review','12']);assert.equal(f.requests.length,0);
+ await f.app.run(['revisions','review','12','--confirm']);
+ assert.equal(f.requests.at(-1).path,'/api/v1/skills/revisions/12/review');assert.deepEqual(JSON.parse(f.requests.at(-1).body),{confirm:true});
+ await f.app.run(['revisions','publish','12']);assert.equal(f.requests.length,1);
+ await f.app.run(['revisions','publish','12','--confirm']);assert.equal(f.requests.at(-1).path,'/api/v1/skills/revisions/12/publish');
+});
