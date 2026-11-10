@@ -151,3 +151,5 @@ Permissions are independent: `flowboom.articles.revise`, `flowboom.articles.agen
 After confirmation, candidate changes and the existing publish task are saved atomically. A queued task is not an online result. Deployment failure uses existing retry/recovery behavior; the original snapshot remains available for operator recovery, with no automatic deployment rollback guarantee. Do not retry ambiguous writes blindly.
 
 Rollout requires the matching backend, migrations 000079/000080, browser build before using the new CLI defaults. Older servers may reject granular scope requests.
+
+PATs may explicitly authorize sites in multiple workspaces (API migration082). New PAT logins retain authorized workspace IDs: use `flowboom workspaces use ID` or `--workspace ID`, and select a site with `--site ID` when a workspace has several authorized sites. Existing saved single-workspace credentials remain valid; repeat PAT stdin login to pick up multi-workspace metadata. Environment PATs discover allowed workspaces when overriding `FLOWBOOM_WORKSPACE` with `--workspace`.
