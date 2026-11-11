@@ -153,3 +153,16 @@ After confirmation, candidate changes and the existing publish task are saved at
 Rollout requires the matching backend, migrations 000079/000080, browser build before using the new CLI defaults. Older servers may reject granular scope requests.
 
 PATs may explicitly authorize sites in multiple workspaces (API migration082). New PAT logins retain authorized workspace IDs: use `flowboom workspaces use ID` or `--workspace ID`, and select a site with `--site ID` when a workspace has several authorized sites. Existing saved single-workspace credentials remain valid; repeat PAT stdin login to pick up multi-workspace metadata. Environment PATs discover allowed workspaces when overriding `FLOWBOOM_WORKSPACE` with `--workspace`.
+
+### 正式写稿
+
+```sh
+flowboom auth login --generation
+flowboom briefs create --file brief.json
+flowboom briefs generate BRIEF_ID
+flowboom tasks get TASK_ID
+flowboom tasks confirm TASK_ID --confirm --max-cost 2
+flowboom generation-tasks get GENERATION_ID
+```
+
+`--generation` 才申请新权限，浏览器可分别选择创建 Brief、生成报价、确认扣费、取消任务。PAT 同样可以独立授权。费用上限为记账分，报价超过上限或余额不足时不启动写稿；生成只创建草稿，审核和发布仍单独授权。`tasks confirm/cancel` 不带 `--confirm` 只读预览。超时先查询任务状态，避免重发写请求。

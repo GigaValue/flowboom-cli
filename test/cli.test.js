@@ -300,3 +300,28 @@ test('multi-workspace PAT keeps explicit consent and allows selecting a saved or
  await assert.rejects(f.app.run(['--workspace','9','sites','list']),/not authorized/);
  assert(!f.requests.some(r=>r.path.includes('/oauth/')));assert(!f.out.value.includes(token));assert(!f.err.value.includes(token));
 });
+
+test('formal generation quotes without spending; task actions require explicit cost authorization', async t => {
+  const f = await fixture(t, (req, res, raw) => {
+    if (req.url.endsWith('/generate-article')) return res.end('{"data":{"task":{"id":30,"estimatedCost":2,"status":"awaiting_confirmation"},"generationTask":{"id":20}}}');
+    if (req.url.endsWith('/confirm')) { assert.deepEqual(JSON.parse(raw), { confirm: true, maxEstimatedCost: 2 }); }
+    if (req.url.endsWith('/cancel')) { assert.deepEqual(JSON.parse(raw), { confirm: true }); }
+    res.end('{"data":{"id":30,"estimatedCost":2,"status":"awaiting_confirmation"}}');
+  });
+  await f.app.run(['briefs','generate','10']);
+  assert.equal(f.requests.at(-1).path,'/api/v1/skills/briefs/10/generate-article');
+  assert.deepEqual(JSON.parse(f.requests.at(-1).body),{});
+  await f.app.run(['tasks','confirm','30']);
+  assert.equal(f.requests.at(-1).method,'GET');
+  assert.match(f.out.value,/confirmationRequired/);
+  const count=f.requests.length;
+  for (const args of [ ['tasks','confirm','30','--confirm'], ['tasks','confirm','30','--confirm','--max-cost','-1'], ['tasks','confirm','30','--confirm','--max-cost','1.5'], ['tasks','confirm','30','--confirm','--max-cost','9007199254740992'] ]) await assert.rejects(f.app.run(args),/max-cost|Invalid command options/);
+  assert.equal(f.requests.length,count);
+  await f.app.run(['tasks','confirm','30','--confirm','--max-cost','2']);
+  assert.equal(f.requests.at(-1).method,'POST');
+  await f.app.run(['tasks','cancel','30']);assert.equal(f.requests.at(-1).method,'GET');
+  await f.app.run(['tasks','cancel','30','--confirm']);assert.equal(f.requests.at(-1).method,'POST');
+  await f.app.run(['generation-tasks','get','20']);assert.equal(f.requests.at(-1).path,'/api/v1/skills/generation-tasks/20');
+  await assert.rejects(f.app.run(['sites','list','--max-cost','2']),/only valid/);
+  await assert.rejects(f.app.run(['auth','login','--read-only','--generation']),/only valid/);
+});
