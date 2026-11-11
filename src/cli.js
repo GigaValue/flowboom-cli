@@ -10,6 +10,7 @@ import { parseJSON, stringifyJSON } from './json.js';
 export const origins = Object.freeze({ cn: 'https://cloud.flowboom.cn', global: 'https://cloud.flowboom.io' });
 const clientID = 'flowboom-cli'; // Keep the deployed OAuth protocol ID; executable/package are flowboom.
 const scopes = 'flowboom.read flowboom.knowledge flowboom.articles.create flowboom.articles.update flowboom.articles.revise flowboom.articles.agent-review flowboom.articles.submit-review flowboom.articles.publish flowboom.articles.schedule';
+const generationScopes = 'flowboom.briefs.create flowboom.articles.generate flowboom.tasks.confirm flowboom.tasks.cancel';
 const MAX_RESPONSE = 8 * 1024 * 1024;
 const MAX_FILE = 1024 * 1024;
 const safeErrors = new Map([
@@ -76,8 +77,8 @@ function browserOpen(url) {
   child.on('error', () => {});
   child.unref();
 }
-const options = Object.fromEntries(['profile', 'workspace', 'base-url', 'site', 'file', 'query', 'status', 'page', 'page-size', 'from', 'to', 'engine', 'source'].map(name => [name, { type: 'string' }]));
-for (const name of ['confirm', 'no-browser', 'read-only', 'pat-stdin', 'help', 'version']) options[name] = { type: 'boolean' };
+const options = Object.fromEntries(['profile', 'workspace', 'base-url', 'site', 'file', 'query', 'status', 'page', 'page-size', 'from', 'to', 'engine', 'source', 'max-cost'].map(name => [name, { type: 'string' }]));
+for (const name of ['confirm', 'no-browser', 'read-only', 'pat-stdin', 'generation', 'help', 'version']) options[name] = { type: 'boolean' };
 options.help.short = 'h';
 options.version.short = 'v';
 
@@ -193,7 +194,7 @@ export class App {
       return;
     }
     const base = normalizeOrigin(flags['base-url'] ?? origins[this.profile]);
-    const d = await this.form(base, '/oauth/device/code', { scope: flags['read-only'] ? 'flowboom.read flowboom.knowledge' : scopes });
+    const d = await this.form(base, '/oauth/device/code', { scope: flags['read-only'] ? 'flowboom.read flowboom.knowledge' : scopes + (flags.generation ? ' ' + generationScopes : '') });
     if (typeof d?.device_code !== 'string' || !d.device_code || !/^[A-Z2-7]{4}-[A-Z2-7]{4}$/.test(d.user_code) || !Number.isSafeInteger(d.expires_in) || d.expires_in < 1 || d.expires_in > 900 || !Number.isSafeInteger(d.interval) || d.interval < 1 || d.interval > d.expires_in) throw new Error('Invalid device authorization response.');
     let link;
     try { link = new URL(d.verification_uri_complete); } catch { throw new Error('Invalid verification URL.'); }
@@ -277,6 +278,8 @@ export class App {
     this.profile = flags.profile ?? this.env.FLOWBOOM_PROFILE ?? 'cn';
     if (!Object.hasOwn(origins, this.profile)) throw new Error('Profile must be cn or global.');
     this.workspace = flags.workspace === undefined ? undefined : numericID(flags.workspace);
+    if (flags.generation && (flags['read-only'] || positionals[0] !== 'auth' || positionals[1] !== 'login')) throw new Error('--generation is only valid for auth login without --read-only.');
+    if (flags['max-cost'] !== undefined && !(positionals[0] === 'tasks' && positionals[1] === 'confirm')) throw new Error('--max-cost is only valid for tasks confirm.');
     if (flags.version) { this.out.write('0.1.0\n'); return; }
     if (flags.help || !positionals.length || positionals[0] === 'help') { this.out.write(help); return; }
     const [command, action, rawID, ...extra] = positionals;
@@ -294,12 +297,26 @@ export class App {
       if ((action === 'list' && rawID) || !['list', 'use'].includes(action)) throw new Error('Use workspaces list or workspaces use ID.');
       return this.workspaces(action, rawID);
     }
-    const requiresID = ['get', 'update', 'revise', 'revisions', 'review', 'submit-review', 'publish'].includes(action);
+    const requiresID = ['get', 'update', 'revise', 'revisions', 'review', 'submit-review', 'publish', 'generate', 'confirm', 'cancel'].includes(action);
     const id = requiresID && rawID ? positiveID(rawID) : undefined;
     if (rawID && !requiresID) throw new Error('Unexpected arguments.');
     if (command === 'articles' && ['submit-review', 'publish'].includes(action)) {
       if (!id) throw new Error('Article ID required.');
       return this.articleAction(action, id, !!flags.confirm);
+    }
+    if (command === 'tasks' && ['confirm', 'cancel'].includes(action)) {
+      if (!id) throw new Error('Task ID required.');
+      let max;
+      if (action === 'confirm' && flags.confirm) {
+        if (!/^\d+$/.test(flags['max-cost'] ?? '') || !Number.isSafeInteger(Number(flags['max-cost']))) throw new Error('Use --max-cost with a nonnegative integer in billing units (cents).');
+        max = Number(flags['max-cost']);
+      }
+      if (!flags.confirm) {
+        const result = await this.api('GET', `/tasks/${id}`);
+        this.print({ ...result, confirmationRequired: true }); return;
+      }
+      this.print(await this.api('POST', `/tasks/${id}/${action}`, action === 'confirm' ? { confirm: true, maxEstimatedCost: max } : { confirm: true }));
+      return;
     }
     if (flags.confirm && !(command === 'articles' && ['schedule', 'unschedule'].includes(action)) && !(command === 'revisions' && ['review','publish'].includes(action))) throw new Error('--confirm is only valid for article publication or scheduling.');
     const site = flags.site === undefined ? undefined : numericID(flags.site);
@@ -312,6 +329,8 @@ export class App {
       case 'sites': if (action !== 'list') throw new Error('Use sites list.'); endpoint = '/sites'; break;
       case 'sources': if (action !== 'list') throw new Error('Use sources list.'); endpoint = '/source-items'; query.set('page', page); if (flags.status) query.set('status', flags.status); break;
       case 'categories': if (action !== 'list' || !site) throw new Error('Use categories list --site ID.'); endpoint = '/categories'; break;
+      case 'tasks': case 'generation-tasks':
+        if (action !== 'get' || !id) throw new Error(`Use ${command} get ID.`); endpoint = `/${command}/${id}`; break;
       case 'publish-tasks': if (action !== 'get' || !id) throw new Error('Use publish-tasks get ID.'); endpoint = `/publish-tasks/${id}`; break;
       case 'articles': case 'topics': case 'briefs':
         if (action === 'list') {
@@ -321,7 +340,8 @@ export class App {
         else if (command === 'articles' && action === 'update' && id) { method = 'PATCH'; endpoint = `/articles/${id}`; }
         else if (command === 'articles' && action === 'revisions' && id) { endpoint = `/articles/${id}/revisions`; }
         else if (command === 'articles' && action === 'revise' && id) { method = 'POST'; endpoint = `/articles/${id}/revisions`; }
-        else if (action === 'create' && command !== 'briefs') { method = 'POST'; endpoint = `/${command}`; }
+        else if (command === 'briefs' && action === 'generate' && id) { method = 'POST'; endpoint = `/briefs/${id}/generate-article`; body = {}; }
+        else if (action === 'create') { method = 'POST'; endpoint = `/${command}`; }
         else if (action === 'from-knowledge' && command === 'briefs') { method = 'POST'; endpoint = '/knowledge/briefs'; }
         else if (command === 'articles' && ['schedule', 'unschedule'].includes(action)) { method = 'POST'; endpoint = `/articles/${action}`; }
         else if (command === 'articles' && action === 'plan' && site) { endpoint = '/publication-plan'; query.set('page', page); query.set('pageSize', size); }
@@ -395,6 +415,12 @@ Profiles: cn=https://cloud.flowboom.cn (default)
   topics create --file topic.json
   briefs list [--site ID] [--page N]
   briefs get ID
+  briefs create --file brief.json
+  briefs generate ID
+  generation-tasks get ID
+  tasks get ID
+  tasks confirm ID [--confirm --max-cost INTEGER]
+  tasks cancel ID [--confirm]
   briefs from-knowledge --file brief.json
   knowledge search --query TEXT [--site ID]
   diagnostics [--site ID]

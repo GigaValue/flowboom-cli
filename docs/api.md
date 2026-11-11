@@ -88,3 +88,15 @@ Permissions are independent: `flowboom.articles.revise`, `flowboom.articles.agen
 After confirmation, candidate changes and the existing publish task are saved atomically. A queued task is not an online result. Deployment failure uses existing retry/recovery behavior; the original snapshot remains available for operator recovery, with no automatic deployment rollback guarantee. Do not retry ambiguous writes blindly.
 
 Rollout requires the matching backend, migrations 000079/000080, browser build before using the new CLI defaults. Older servers may reject granular scope requests.
+
+## Formal generation (separate opt-in scopes)
+
+`auth login --generation` additionally requests `flowboom.briefs.create flowboom.articles.generate flowboom.tasks.confirm flowboom.tasks.cancel`; users can grant each independently. Normal login never requests payment confirmation. Existing tokens are unchanged; PATs may select the same scopes with explicit workspace/site targets.
+
+- POST `/skills/briefs`: `{siteId,title,categoryId?,mainKeyword?,searchIntent?,sourceSummary?,requirements?}`; draft only, same-site category. Maximum title255, keyword255, intent64, sources20000, requirements10000 characters and total128KiB. No state, templates or resource IDs. No creation idempotency: inspect after timeout before retrying.
+- POST `/skills/briefs/:id/generate-article`: stable quote/task by Brief, no charge; ordinary SEO only, excludes content packs. Receipt `{data:{task,generationTask}}`. Repeating a terminal task never creates a new paid attempt.
+- GET `/skills/generation-tasks/:id` and `/skills/tasks/:id`: bounded safe progress and costs, no raw prompt/output/snapshots/errors. Only mutually linked SEO generation tasks are exposed.
+- POST `/skills/tasks/:id/confirm`: `{confirm:true,maxEstimatedCost:INTEGER}` in billing units (cents). Above cap409; insufficient funds402, stays awaiting_confirmation. Duplicate confirmation409, never double-freezes.
+- POST `/skills/tasks/:id/cancel`: `{confirm:true}` through existing cancellation/refund state machine.
+
+Brief/create/generate require content.write. Confirmation/cancellation additionally require task.write. Neither grants publication or approval. `tasks confirm/cancel` without `--confirm` only reads status; confirmed payment also requires `--max-cost`. Writes are never automatically retried.
